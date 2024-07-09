@@ -2,7 +2,6 @@
 mod tests;
 
 use self::Entry::*;
-use cow_hashbrown::hash_map::CowValueGuard;
 use cow_hashbrown::{self as base, Equivalent};
 
 use std::borrow::Borrow;
@@ -11,6 +10,8 @@ use std::fmt::{self, Debug};
 use std::hash::{BuildHasher, Hash, RandomState};
 use std::iter::FusedIterator;
 use std::sync::Arc;
+
+pub use cow_hashbrown::hash_map::CowValueGuard;
 
 /// A [hash map] implemented with quadratic probing and SIMD lookup.
 ///
