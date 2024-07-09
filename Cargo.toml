@@ -1,0 +1,17 @@
+[package]
+name = "cow_hashmap"
+version = "0.1.0"
+authors = ["John Sharratt <johnathan.sharratt@gmail.com>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/john-sharratt/cow_hashmap"
+readme = "README.md"
+keywords = ["hash", "hashmap", "swisstable", "cow"]
+categories = ["data-structures"]
+
+[dependencies]
+arc-swap = "1"
+cow_hashbrown = "0.14"
+
+[dev-dependencies]
+rand = "0.8.5"
