@@ -1,5 +1,6 @@
 [package]
 name = "cow_hashmap"
+description = "Hashmap with copy-on-write semantics that requires no locks"
 version = "0.1.0"
 authors = ["John Sharratt <johnathan.sharratt@gmail.com>"]
 edition = "2021"
