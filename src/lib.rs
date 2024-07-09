@@ -441,7 +441,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over values takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
+    pub fn values_mut(&self) -> ValuesMut<'_, K, V> {
         ValuesMut {
             inner: self.iter_mut(),
         }
@@ -539,7 +539,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over map takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
+    pub fn iter_mut(&self) -> IterMut<'_, K, V> {
         IterMut {
             base: self.base.iter_mut(),
         }
@@ -603,7 +603,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// assert!(a.is_empty());
     /// ```
     #[inline]
-    pub fn drain(&mut self) -> Drain<'_, K, V> {
+    pub fn drain(&self) -> Drain<'_, K, V> {
         Drain {
             base: self.base.drain(),
         }
@@ -629,7 +629,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// In the current implementation, this operation takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
-    pub fn retain<F>(&mut self, f: F)
+    pub fn retain<F>(&self, f: F)
     where
         F: FnMut(&K, &mut V) -> bool,
         V: Clone,
@@ -651,7 +651,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// assert!(a.is_empty());
     /// ```
     #[inline]
-    pub fn clear(&mut self) {
+    pub fn clear(&self) {
         self.base.clear();
     }
 
@@ -696,7 +696,7 @@ where
     /// map.reserve(10);
     /// ```
     #[inline]
-    pub fn reserve(&mut self, additional: usize) {
+    pub fn reserve(&self, additional: usize) {
         self.base.reserve(additional)
     }
 
@@ -717,7 +717,7 @@ where
     /// assert!(map.capacity() >= 2);
     /// ```
     #[inline]
-    pub fn shrink_to_fit(&mut self) {
+    pub fn shrink_to_fit(&self) {
         self.base.shrink_to_fit();
     }
 
@@ -742,7 +742,7 @@ where
     /// assert!(map.capacity() >= 2);
     /// ```
     #[inline]
-    pub fn shrink_to(&mut self, min_capacity: usize) {
+    pub fn shrink_to(&self, min_capacity: usize) {
         self.base.shrink_to(min_capacity);
     }
 
@@ -766,7 +766,7 @@ where
     /// assert_eq!(letters.get(&'y'), None);
     /// ```
     #[inline]
-    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S> {
+    pub fn entry(&self, key: K) -> Entry<'_, K, V, S> {
         map_entry(self.base.entry(key))
     }
 
@@ -867,7 +867,7 @@ where
     /// assert_eq!(map.get(&1).unwrap(), Arc::new("b"));
     /// ```
     #[inline]
-    pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<CowValueGuard<V>>
+    pub fn get_mut<Q: ?Sized>(&self, k: &Q) -> Option<CowValueGuard<V>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
@@ -900,7 +900,7 @@ where
     /// assert_eq!(*map.get(&37).unwrap(), "c");
     /// ```
     #[inline]
-    pub fn insert(&mut self, k: K, v: V) -> Option<CowValueGuard<V>> {
+    pub fn insert(&self, k: K, v: V) -> Option<CowValueGuard<V>> {
         self.base.insert(k, v)
     }
 
@@ -927,7 +927,7 @@ where
     /// assert_eq!(err.value, "b");
     /// ```
     pub fn try_insert(
-        &mut self,
+        &self,
         key: K,
         value: V,
     ) -> Result<CowValueGuard<V>, OccupiedError<'_, K, V, S>> {
@@ -956,7 +956,7 @@ where
     /// assert_eq!(map.remove(&1), None);
     /// ```
     #[inline]
-    pub fn remove<Q: ?Sized>(&mut self, k: &Q) -> Option<Arc<V>>
+    pub fn remove<Q: ?Sized>(&self, k: &Q) -> Option<Arc<V>>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
@@ -985,7 +985,7 @@ where
     /// # }
     /// ```
     #[inline]
-    pub fn remove_entry<Q: ?Sized>(&mut self, k: &Q) -> Option<(K, Arc<V>)>
+    pub fn remove_entry<Q: ?Sized>(&self, k: &Q) -> Option<(K, Arc<V>)>
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
@@ -1938,7 +1938,7 @@ impl<'a, K: Clone, V, S> Entry<'a, K, V, S> {
         F: FnOnce(CowValueGuard<V>),
     {
         match self {
-            Occupied(mut entry) => {
+            Occupied(entry) => {
                 f(entry.get_mut());
                 Occupied(entry)
             }
@@ -2072,7 +2072,7 @@ impl<'a, K: Clone, V, S> OccupiedEntry<'a, K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(24));
     /// ```
     #[inline]
-    pub fn get_mut(&mut self) -> CowValueGuard<V> {
+    pub fn get_mut(&self) -> CowValueGuard<V> {
         self.base.get_mut()
     }
 
@@ -2125,7 +2125,7 @@ impl<'a, K: Clone, V, S> OccupiedEntry<'a, K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(15));
     /// ```
     #[inline]
-    pub fn insert(&mut self, value: V) -> Arc<V> {
+    pub fn insert(&self, value: V) -> Arc<V> {
         self.base.insert(value)
     }
 

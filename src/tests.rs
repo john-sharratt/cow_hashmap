@@ -24,7 +24,7 @@ fn test_zero_capacities() {
     let m = HM::with_capacity_and_hasher(0, RandomState::new());
     assert_eq!(m.capacity(), 0);
 
-    let mut m = HM::new();
+    let m = HM::new();
     m.insert(1, 1);
     m.insert(2, 2);
     m.remove(&1);
@@ -32,14 +32,14 @@ fn test_zero_capacities() {
     m.shrink_to_fit();
     assert_eq!(m.capacity(), 0);
 
-    let mut m = HM::new();
+    let m = HM::new();
     m.reserve(0);
     assert_eq!(m.capacity(), 0);
 }
 
 #[test]
 fn test_create_capacity_zero() {
-    let mut m = CowHashMap::with_capacity(0);
+    let m = CowHashMap::with_capacity(0);
 
     assert!(m.insert(1, 1).is_none());
 
@@ -49,7 +49,7 @@ fn test_create_capacity_zero() {
 
 #[test]
 fn test_insert() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     assert_eq!(m.len(), 0);
     assert!(m.insert(1, 2).is_none());
     assert_eq!(m.len(), 1);
@@ -61,7 +61,7 @@ fn test_insert() {
 
 #[test]
 fn test_clone() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     assert_eq!(m.len(), 0);
     assert!(m.insert(1, 2).is_none());
     assert_eq!(m.len(), 1);
@@ -111,7 +111,7 @@ fn test_drops() {
     });
 
     {
-        let mut m = CowHashMap::new();
+        let m = CowHashMap::new();
 
         DROP_VECTOR.with(|v| {
             for i in 0..200 {
@@ -170,7 +170,7 @@ fn test_into_iter_drops() {
     });
 
     let hm = {
-        let mut hm = CowHashMap::new();
+        let hm = CowHashMap::new();
 
         DROP_VECTOR.with(|v| {
             for i in 0..200 {
@@ -217,13 +217,13 @@ fn test_into_iter_drops() {
 
 #[test]
 fn test_empty_remove() {
-    let mut m: CowHashMap<i32, bool> = CowHashMap::new();
+    let m: CowHashMap<i32, bool> = CowHashMap::new();
     assert_eq!(m.remove(&0), None);
 }
 
 #[test]
 fn test_empty_entry() {
-    let mut m: CowHashMap<i32, bool> = CowHashMap::new();
+    let m: CowHashMap<i32, bool> = CowHashMap::new();
     match m.entry(0) {
         Occupied(_) => panic!(),
         Vacant(_) => {}
@@ -234,7 +234,7 @@ fn test_empty_entry() {
 
 #[test]
 fn test_empty_iter() {
-    let mut m: CowHashMap<i32, bool> = CowHashMap::new();
+    let m: CowHashMap<i32, bool> = CowHashMap::new();
     assert_eq!(m.drain().next(), None);
     assert_eq!(m.keys().next(), None);
     assert_eq!(m.values().next(), None);
@@ -248,7 +248,7 @@ fn test_empty_iter() {
 
 #[test]
 fn test_lots_of_insertions() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
 
     // Try this a few times to make sure we never screw up the hashmap's
     // internal state.
@@ -314,7 +314,7 @@ fn test_lots_of_insertions() {
 
 #[test]
 fn test_find_mut() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     assert!(m.insert(1, 12).is_none());
     assert!(m.insert(2, 8).is_none());
     assert!(m.insert(5, 14).is_none());
@@ -328,7 +328,7 @@ fn test_find_mut() {
 
 #[test]
 fn test_insert_overwrite() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     assert!(m.insert(1, 2).is_none());
     assert_eq!(*m.get(&1).unwrap(), 2);
     assert!(!m.insert(1, 3).is_none());
@@ -337,7 +337,7 @@ fn test_insert_overwrite() {
 
 #[test]
 fn test_insert_conflicts() {
-    let mut m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::with_capacity(4);
     assert!(m.insert(1, 2).is_none());
     assert!(m.insert(5, 3).is_none());
     assert!(m.insert(9, 4).is_none());
@@ -348,7 +348,7 @@ fn test_insert_conflicts() {
 
 #[test]
 fn test_conflict_remove() {
-    let mut m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::with_capacity(4);
     assert!(m.insert(1, 2).is_none());
     assert_eq!(*m.get(&1).unwrap(), 2);
     assert!(m.insert(5, 3).is_none());
@@ -365,7 +365,7 @@ fn test_conflict_remove() {
 
 #[test]
 fn test_is_empty() {
-    let mut m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::with_capacity(4);
     assert!(m.insert(1, 2).is_none());
     assert!(!m.is_empty());
     assert!(m.remove(&1).is_some());
@@ -374,7 +374,7 @@ fn test_is_empty() {
 
 #[test]
 fn test_remove() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     m.insert(1, 2);
     assert_eq!(m.remove(&1), Some(Arc::new(2)));
     assert_eq!(m.remove(&1), None);
@@ -382,7 +382,7 @@ fn test_remove() {
 
 #[test]
 fn test_remove_entry() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     m.insert(1, 2);
     assert_eq!(m.remove_entry(&1), Some((1, Arc::new(2))));
     assert_eq!(m.remove(&1), None);
@@ -390,7 +390,7 @@ fn test_remove_entry() {
 
 #[test]
 fn test_iterate() {
-    let mut m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::with_capacity(4);
     for i in 0..32 {
         assert!(m.insert(i, i * 2).is_none());
     }
@@ -430,7 +430,7 @@ fn test_values() {
 #[test]
 fn test_values_mut() {
     let pairs = [(1, 1), (2, 2), (3, 3)];
-    let mut map: CowHashMap<_, _> = pairs.into_iter().collect();
+    let map: CowHashMap<_, _> = pairs.into_iter().collect();
     for mut value in map.values_mut() {
         *value = (*value) * 2
     }
@@ -467,7 +467,7 @@ fn test_into_values() {
 
 #[test]
 fn test_find() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     assert!(m.get(&1).is_none());
     m.insert(1, 2);
     match m.get(&1) {
@@ -478,12 +478,12 @@ fn test_find() {
 
 #[test]
 fn test_eq() {
-    let mut m1 = CowHashMap::new();
+    let m1 = CowHashMap::new();
     m1.insert(1, 2);
     m1.insert(2, 3);
     m1.insert(3, 4);
 
-    let mut m2 = CowHashMap::new();
+    let m2 = CowHashMap::new();
     m2.insert(1, 2);
     m2.insert(2, 3);
 
@@ -496,7 +496,7 @@ fn test_eq() {
 
 #[test]
 fn test_show() {
-    let mut map = CowHashMap::new();
+    let map = CowHashMap::new();
     let empty: CowHashMap<i32, i32> = CowHashMap::new();
 
     map.insert(1, 2);
@@ -510,7 +510,7 @@ fn test_show() {
 
 #[test]
 fn test_reserve_shrink_to_fit() {
-    let mut m = CowHashMap::new();
+    let m = CowHashMap::new();
     m.insert(0, 0);
     m.remove(&0);
     assert!(m.capacity() >= m.len());
@@ -588,7 +588,7 @@ fn test_iter_len() {
 fn test_mut_size_hint() {
     let xs = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
 
-    let mut map: CowHashMap<_, _> = xs.iter().cloned().collect();
+    let map: CowHashMap<_, _> = xs.iter().cloned().collect();
 
     let mut iter = map.iter_mut();
 
@@ -601,7 +601,7 @@ fn test_mut_size_hint() {
 fn test_iter_mut_len() {
     let xs = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
 
-    let mut map: CowHashMap<_, _> = xs.iter().cloned().collect();
+    let map: CowHashMap<_, _> = xs.iter().cloned().collect();
 
     let mut iter = map.iter_mut();
 
@@ -614,12 +614,12 @@ fn test_iter_mut_len() {
 fn test_entry() {
     let xs = [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50), (6, 60)];
 
-    let mut map: CowHashMap<_, _> = xs.iter().cloned().collect();
+    let map: CowHashMap<_, _> = xs.iter().cloned().collect();
 
     // Existing key (insert)
     match map.entry(1) {
         Vacant(_) => unreachable!(),
-        Occupied(mut view) => {
+        Occupied(view) => {
             assert_eq!(view.get(), Arc::new(10));
             assert_eq!(view.insert(100), Arc::new(10));
         }
@@ -630,7 +630,7 @@ fn test_entry() {
     // Existing key (update)
     match map.entry(2) {
         Vacant(_) => unreachable!(),
-        Occupied(mut view) => {
+        Occupied(view) => {
             let mut v = view.get_mut();
             let new_v = (*v) * 10;
             *v = new_v;
@@ -662,7 +662,7 @@ fn test_entry() {
 
 #[test]
 fn test_capacity_not_less_than_len() {
-    let mut a = CowHashMap::new();
+    let a = CowHashMap::new();
     let mut item = 0;
 
     for _ in 0..116 {
@@ -687,7 +687,7 @@ fn test_capacity_not_less_than_len() {
 
 #[test]
 fn test_occupied_entry_key() {
-    let mut a = CowHashMap::new();
+    let a = CowHashMap::new();
     let key = "hello there";
     let value = "value goes here";
     assert!(a.is_empty());
@@ -705,7 +705,7 @@ fn test_occupied_entry_key() {
 
 #[test]
 fn test_vacant_entry_key() {
-    let mut a: CowHashMap<&str, &str> = CowHashMap::new();
+    let a: CowHashMap<&str, &str> = CowHashMap::new();
     let key = "hello there";
     let value = "value goes here";
 
@@ -723,7 +723,7 @@ fn test_vacant_entry_key() {
 
 #[test]
 fn test_retain() {
-    let mut map: CowHashMap<i32, i32> = (0..100).map(|x| (x, x * 10)).collect();
+    let map: CowHashMap<i32, i32> = (0..100).map(|x| (x, x * 10)).collect();
 
     map.retain(|&k, _| k % 2 == 0);
     assert_eq!(map.len(), 50);
