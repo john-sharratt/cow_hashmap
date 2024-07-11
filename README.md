@@ -8,11 +8,12 @@ This crate takes the original hashmap implementation that was ported from
 Google's high-performance [SwissTable] hash map and wraps it in AtomicPtr
 compare and replace operations which give it copy-on-write sementics.
 
-Note: That inserting values into the hashmap will copy the entire hashmap
-every time thus inserts are no where near as fast as the original swishtable
-implementation however they do execute the operation lock-free while
-concurrent reads can happen in parallel. Essentially this construct is
-really good for read intensive operations.
+Note: That inserting values into the hashmap will copy shards that make
+up the hash map thus there are performance considerations to take into
+account here.
+
+This hashmap will perform reasonable well for inserts and very fast for reads
+thus it is highly suited to read intensive operations.
 
 Access the values at the leafs of the hashmap are also copy-on-write
 thus readonly access is very fast however writes will copy the original
@@ -23,6 +24,40 @@ operations have been implemented inside the compare-and-swap loop
 thus they allow for concurrent writes without losing data however
 when accessing a value using `get_mut` the value you be entirely
 replaced when it falls out of scope.
+
+## Internals
+
+This HashMap works as follows:
+
+- The hashmap is built using 3 layers of different sizes that are optimized
+  to minimize the amount of copying.
+- Inserting or removing a value from the hashmap copies a particular shard
+  and then performs a compare and swap operation to safely replace it in the
+  main map.
+- Each entry in the HashMap is cloned whenever it is edited.
+- Mutation functions with lamda's will compare and swap the mutated value
+  thus ensuring concurrent writes are safe
+- At the leaf of the layers is a normal hashbrown table that holds the
+  real value.
+
+## Performance
+
+Not the best performance testing but it's better than nothing!
+
+1 million entries inserted and removed from the HashMap.
+
+```
+PS C:\Users\johna\prog\cow_hashmap> cargo test --release test_millions_of_inserts_and_removes
+    Finished `release` profile [optimized] target(s) in 0.01s
+     Running unittests src\lib.rs (target\release\deps\cow_hashmap-1df93076c4962117.exe)
+
+running 1 test
+test tests::test_millions_of_inserts_and_removes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 3.79s
+
+PS C:\Users\johna\prog\cow_hashmap>
+```
 
 ## Usage
 

@@ -3,49 +3,6 @@ use super::*;
 use super::CowHashMap;
 use super::Entry::{Occupied, Vacant};
 use std::cell::RefCell;
-use std::hash::RandomState;
-
-#[test]
-fn test_zero_capacities() {
-    type HM = CowHashMap<i32, i32>;
-
-    let m = HM::new();
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::default();
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::with_hasher(RandomState::new());
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::with_capacity(0);
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::with_capacity_and_hasher(0, RandomState::new());
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::new();
-    m.insert(1, 1);
-    m.insert(2, 2);
-    m.remove(&1);
-    m.remove(&2);
-    m.shrink_to_fit();
-    assert_eq!(m.capacity(), 0);
-
-    let m = HM::new();
-    m.reserve(0);
-    assert_eq!(m.capacity(), 0);
-}
-
-#[test]
-fn test_create_capacity_zero() {
-    let m = CowHashMap::with_capacity(0);
-
-    assert!(m.insert(1, 1).is_none());
-
-    assert!(m.contains_key(&1));
-    assert!(!m.contains_key(&0));
-}
 
 #[test]
 fn test_insert() {
@@ -247,6 +204,19 @@ fn test_empty_iter() {
 }
 
 #[test]
+fn test_millions_of_inserts_and_removes() {
+    let m = CowHashMap::new();
+
+    for n in 0..1_000_000i32 {
+        m.insert(n, n);
+    }
+
+    for n in 0..1_000_000i32 {
+        m.remove(&n);
+    }
+}
+
+#[test]
 fn test_lots_of_insertions() {
     let m = CowHashMap::new();
 
@@ -337,7 +307,7 @@ fn test_insert_overwrite() {
 
 #[test]
 fn test_insert_conflicts() {
-    let m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::new();
     assert!(m.insert(1, 2).is_none());
     assert!(m.insert(5, 3).is_none());
     assert!(m.insert(9, 4).is_none());
@@ -348,7 +318,7 @@ fn test_insert_conflicts() {
 
 #[test]
 fn test_conflict_remove() {
-    let m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::new();
     assert!(m.insert(1, 2).is_none());
     assert_eq!(*m.get(&1).unwrap(), 2);
     assert!(m.insert(5, 3).is_none());
@@ -365,7 +335,7 @@ fn test_conflict_remove() {
 
 #[test]
 fn test_is_empty() {
-    let m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::new();
     assert!(m.insert(1, 2).is_none());
     assert!(!m.is_empty());
     assert!(m.remove(&1).is_some());
@@ -390,7 +360,7 @@ fn test_remove_entry() {
 
 #[test]
 fn test_iterate() {
-    let m = CowHashMap::with_capacity(4);
+    let m = CowHashMap::new();
     for i in 0..32 {
         assert!(m.insert(i, i * 2).is_none());
     }
@@ -509,43 +479,6 @@ fn test_show() {
 }
 
 #[test]
-fn test_reserve_shrink_to_fit() {
-    let m = CowHashMap::new();
-    m.insert(0, 0);
-    m.remove(&0);
-    assert!(m.capacity() >= m.len());
-    for i in 0..128 {
-        m.insert(i, i);
-    }
-    m.reserve(256);
-
-    let usable_cap = m.capacity();
-    for i in 128..(128 + 256) {
-        m.insert(i, i);
-        assert_eq!(m.capacity(), usable_cap);
-    }
-
-    for i in 100..(128 + 256) {
-        assert_eq!(m.remove(&i), Some(Arc::new(i)));
-    }
-    m.shrink_to_fit();
-
-    assert_eq!(m.len(), 100);
-    assert!(!m.is_empty());
-    assert!(m.capacity() >= m.len());
-
-    for i in 0..100 {
-        assert_eq!(m.remove(&i), Some(Arc::new(i)));
-    }
-    m.shrink_to_fit();
-    m.insert(0, 0);
-
-    assert_eq!(m.len(), 1);
-    assert!(m.capacity() >= m.len());
-    assert_eq!(m.remove(&0), Some(Arc::new(0)));
-}
-
-#[test]
 fn test_from_iter() {
     let xs = [(1, 1), (2, 2), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
 
@@ -559,19 +492,6 @@ fn test_from_iter() {
 }
 
 #[test]
-fn test_size_hint() {
-    let xs = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
-
-    let map: CowHashMap<_, _> = xs.iter().cloned().collect();
-
-    let mut iter = map.iter();
-
-    for _ in iter.by_ref().take(3) {}
-
-    assert_eq!(iter.size_hint(), (3, Some(3)));
-}
-
-#[test]
 fn test_iter_len() {
     let xs = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
 
@@ -582,19 +502,6 @@ fn test_iter_len() {
     for _ in iter.by_ref().take(3) {}
 
     assert_eq!(iter.len(), 3);
-}
-
-#[test]
-fn test_mut_size_hint() {
-    let xs = [(1, 1), (2, 2), (3, 3), (4, 4), (5, 5), (6, 6)];
-
-    let map: CowHashMap<_, _> = xs.iter().cloned().collect();
-
-    let mut iter = map.iter_mut();
-
-    for _ in iter.by_ref().take(3) {}
-
-    assert_eq!(iter.size_hint(), (3, Some(3)));
 }
 
 #[test]
@@ -658,31 +565,6 @@ fn test_entry() {
     }
     assert_eq!(map.get(&10).unwrap(), Arc::new(1000));
     assert_eq!(map.len(), 6);
-}
-
-#[test]
-fn test_capacity_not_less_than_len() {
-    let a = CowHashMap::new();
-    let mut item = 0;
-
-    for _ in 0..116 {
-        a.insert(item, 0);
-        item += 1;
-    }
-
-    assert!(a.capacity() > a.len());
-
-    let free = a.capacity() - a.len();
-    for _ in 0..free {
-        a.insert(item, 0);
-        item += 1;
-    }
-
-    assert_eq!(a.len(), a.capacity());
-
-    // Insert at capacity should cause allocation.
-    a.insert(item, 0);
-    assert!(a.capacity() > a.len());
 }
 
 #[test]

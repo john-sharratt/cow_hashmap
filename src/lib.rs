@@ -7,11 +7,39 @@ use cow_hashbrown::{self as base, Equivalent};
 use std::borrow::Borrow;
 use std::error::Error;
 use std::fmt::{self, Debug};
-use std::hash::{BuildHasher, Hash, RandomState};
+use std::hash::{BuildHasher, Hash, Hasher, RandomState};
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
 pub use cow_hashbrown::hash_map::CowValueGuard;
+
+// The first shard level size will infrequently copy itself
+// after the hashmap has been populated with a decent amount of elements.
+const DEFAULT_SHARD_LEVEL1_SIZE: u64 = 256;
+// The second shard level will more frequently copy itself
+// during insert operations given a hash collision is much
+// less likely however on very large populations the copy
+// rate will drop off
+const DEFAULT_SHARD_LEVEL2_SIZE: u64 = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ShardIndex {
+    hash: u16,
+}
+
+fn key_shards<K: Hash + ?Sized, S: BuildHasher, const N1: u64, const N2: u64>(key: &K, hash_builder: &S) -> (ShardIndex, ShardIndex) {
+    let mut state = hash_builder.build_hasher();
+    key.hash(&mut state);
+    let hash1 = state.finish();
+
+    key.hash(&mut state);
+    let hash2 = state.finish();
+
+    (ShardIndex { hash: (hash1 % DEFAULT_SHARD_LEVEL1_SIZE) as u16 },
+     ShardIndex { hash: (hash2 % DEFAULT_SHARD_LEVEL2_SIZE) as u16 })
+}
+
+type ShardMap<K, V, S> = base::CowHashMap<ShardIndex, base::CowHashMap<K, V, S>, S>;
 
 /// A [hash map] implemented with quadratic probing and SIMD lookup.
 ///
@@ -207,7 +235,7 @@ pub use cow_hashbrown::hash_map::CowValueGuard;
 /// ```
 
 pub struct CowHashMap<K: Clone, V, S = RandomState> {
-    base: base::CowHashMap<K, V, S>,
+    base: base::CowHashMap<ShardIndex, ShardMap<K,V, S>, S>,
 }
 
 impl<K: Clone, V> CowHashMap<K, V, RandomState> {
@@ -226,24 +254,6 @@ impl<K: Clone, V> CowHashMap<K, V, RandomState> {
     #[must_use]
     pub fn new() -> CowHashMap<K, V, RandomState> {
         Default::default()
-    }
-
-    /// Creates an empty `HashMap` with at least the specified capacity.
-    ///
-    /// The hash map will be able to hold at least `capacity` elements without
-    /// reallocating. This method is allowed to allocate for more elements than
-    /// `capacity`. If `capacity` is 0, the hash map will not allocate.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    /// let mut map: HashMap<&str, i32> = HashMap::with_capacity(10);
-    /// ```
-    #[inline]
-    #[must_use]
-    pub fn with_capacity(capacity: usize) -> CowHashMap<K, V, RandomState> {
-        CowHashMap::with_capacity_and_hasher(capacity, Default::default())
     }
 }
 
@@ -278,55 +288,6 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
         }
     }
 
-    /// Creates an empty `HashMap` with at least the specified capacity, using
-    /// `hasher` to hash the keys.
-    ///
-    /// The hash map will be able to hold at least `capacity` elements without
-    /// reallocating. This method is allowed to allocate for more elements than
-    /// `capacity`. If `capacity` is 0, the hash map will not allocate.
-    ///
-    /// Warning: `hasher` is normally randomly generated, and
-    /// is designed to allow HashMaps to be resistant to attacks that
-    /// cause many collisions and very poor performance. Setting it
-    /// manually using this function can expose a DoS attack vector.
-    ///
-    /// The `hasher` passed should implement the [`BuildHasher`] trait for
-    /// the HashMap to be useful, see its documentation for details.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    /// use std::hash::RandomState;
-    ///
-    /// let s = RandomState::new();
-    /// let mut map = HashMap::with_capacity_and_hasher(10, s);
-    /// map.insert(1, 2);
-    /// ```
-    #[inline]
-    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> CowHashMap<K, V, S> {
-        CowHashMap {
-            base: base::CowHashMap::with_capacity_and_hasher(capacity, hasher),
-        }
-    }
-
-    /// Returns the number of elements the map can hold without reallocating.
-    ///
-    /// This number is a lower bound; the `HashMap<K, V>` might be able to hold
-    /// more, but is guaranteed to be able to hold at least this many.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    /// let map: HashMap<i32, i32> = HashMap::with_capacity(100);
-    /// assert!(map.capacity() >= 100);
-    /// ```
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.base.capacity()
-    }
-
     /// An iterator visiting all keys in arbitrary order.
     /// The iterator element type is `&'a K`.
     ///
@@ -350,7 +311,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over keys takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn keys(&self) -> Keys<'_, K, V> {
+    pub fn keys(&self) -> Keys<K, V, S> {
         Keys { inner: self.iter() }
     }
 
@@ -381,7 +342,8 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// In the current implementation, iterating over keys takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
-    pub fn into_keys(self) -> IntoKeys<K, V> {
+    pub fn into_keys(self) -> IntoKeys<K, V, S>
+    where S: Clone {
         IntoKeys {
             inner: self.into_iter(),
         }
@@ -410,7 +372,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over values takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn values(&self) -> Values<'_, K, V> {
+    pub fn values(&self) -> Values<K, V, S> {
         Values { inner: self.iter() }
     }
 
@@ -441,7 +403,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over values takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn values_mut(&self) -> ValuesMut<'_, K, V> {
+    pub fn values_mut(&self) -> ValuesMut<K, V, S> {
         ValuesMut {
             inner: self.iter_mut(),
         }
@@ -475,7 +437,8 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// In the current implementation, iterating over values takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
-    pub fn into_values(self) -> IntoValues<K, V> {
+    pub fn into_values(self) -> IntoValues<K, V, S>
+    where S: Clone {
         IntoValues {
             inner: self.into_iter(),
         }
@@ -504,9 +467,11 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over map takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn iter(&self) -> Iter<'_, K, V> {
+    pub fn iter(&self) -> Iter<K, V, S> {
         Iter {
             base: self.base.iter(),
+            shard1: None,
+            shard2: None,
         }
     }
 
@@ -539,9 +504,11 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     ///
     /// In the current implementation, iterating over map takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
-    pub fn iter_mut(&self) -> IterMut<'_, K, V> {
+    pub fn iter_mut(&self) -> IterMut<K, V, S> {
         IterMut {
-            base: self.base.iter_mut(),
+            base: self.base.iter(),
+            shard1: None,
+            shard2: None,
         }
     }
 
@@ -558,7 +525,9 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// assert_eq!(a.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
-        self.base.len()
+        self.base.iter().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 
     /// Returns `true` if the map contains no elements.
@@ -575,7 +544,12 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.base.is_empty()
+        if self.base.is_empty() {
+            return true;
+        }
+        self.base
+            .iter()
+            .all(|(_, t)| t.is_empty())
     }
 
     /// Clears the map, returning all key-value pairs as an iterator. Keeps the
@@ -603,9 +577,49 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// assert!(a.is_empty());
     /// ```
     #[inline]
-    pub fn drain(&self) -> Drain<'_, K, V> {
-        Drain {
+    pub fn drain(&self) -> Drain<K, V, S> {
+        let ret = Drain {
             base: self.base.drain(),
+            shard1: None,
+            shard2: None
+        };
+        ret
+    }
+
+    /// Retains only the elements specified by the predicate.
+    ///
+    /// In other words, remove all pairs `(k, v)` for which `f(&k, &mut v)` returns `false`.
+    /// The elements are visited in unsorted (and unspecified) order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    ///
+    /// let mut map: HashMap<i32, i32> = (0..8).map(|x| (x, x*10)).collect();
+    /// map.retain(|&k, _| k % 2 == 0);
+    /// assert_eq!(map.len(), 4);
+    /// ```
+    ///
+    /// # Performance
+    ///
+    /// In the current implementation, this operation takes O(capacity) time
+    /// instead of O(len) because it internally visits empty buckets too.
+    #[inline]
+    pub fn retain<F>(&self, mut f: F)
+    where
+        F: FnMut(&K, &V) -> bool,
+        V: Clone,
+        S: Clone,
+    {
+        let mut f = move |k: &K, v: &V| -> bool {
+            f(k, v)
+        };
+        for shard1 in self.base.values() {
+            for shard2 in shard1.values() {
+                shard2.retain(&mut f);
+            }
+            shard1.retain(|_, t| !t.is_empty());
         }
     }
 
@@ -629,12 +643,21 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// In the current implementation, this operation takes O(capacity) time
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
-    pub fn retain<F>(&self, f: F)
+    pub fn retain_mut<F>(&self, mut f: F)
     where
         F: FnMut(&K, &mut V) -> bool,
         V: Clone,
+        S: Clone,
     {
-        self.base.retain(f)
+        let mut f = move |k: &K, v: &mut V| -> bool {
+            f(k, v)
+        };
+        for shard1 in self.base.values() {
+            for shard2 in shard1.values() {
+                shard2.retain_mut(&mut f);
+            }
+            shard1.retain(|_, t| !t.is_empty());
+        }
     }
 
     /// Clears the map, removing all key-value pairs. Keeps the allocated memory
@@ -678,72 +701,40 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
-    /// Reserves capacity for at least `additional` more elements to be inserted
-    /// in the `HashMap`. The collection may reserve more space to speculatively
-    /// avoid frequent reallocations. After calling `reserve`,
-    /// capacity will be greater than or equal to `self.len() + additional`.
-    /// Does nothing if capacity is already sufficient.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the new allocation size overflows [`usize`].
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    /// let mut map: HashMap<&str, i32> = HashMap::new();
-    /// map.reserve(10);
-    /// ```
-    #[inline]
-    pub fn reserve(&self, additional: usize) {
-        self.base.reserve(additional)
+    /// Grabs the shard that is relevant for this particular key
+    fn shard<Q: ?Sized>(&self, key: &Q) -> Option<Arc<base::CowHashMap<K, V, S>>>
+    where Q: Hash + Eq {
+        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
+        self
+            .base
+            .get(&shard1)?
+            .get(&shard2)
     }
 
-    /// Shrinks the capacity of the map as much as possible. It will drop
-    /// down as much as possible while maintaining the internal rules
-    /// and possibly leaving some space in accordance with the resize policy.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    ///
-    /// let mut map: HashMap<i32, i32> = HashMap::with_capacity(100);
-    /// map.insert(1, 2);
-    /// map.insert(3, 4);
-    /// assert!(map.capacity() >= 100);
-    /// map.shrink_to_fit();
-    /// assert!(map.capacity() >= 2);
-    /// ```
-    #[inline]
-    pub fn shrink_to_fit(&self) {
-        self.base.shrink_to_fit();
+    fn shard_and_parent<Q: ?Sized>(&self, key: &Q) -> Option<(Arc<base::CowHashMap<K, V, S>>, Arc<cow_hashbrown::CowHashMap<ShardIndex, cow_hashbrown::CowHashMap<K, V, S>, S>>)>
+    where Q: Hash + Eq {
+        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
+        let parent = self
+            .base
+            .get(&shard1)?;
+
+        let ret = parent
+            .get(&shard2)?;
+
+        Some((ret, parent))
     }
 
-    /// Shrinks the capacity of the map with a lower limit. It will drop
-    /// down no lower than the supplied limit while maintaining the internal rules
-    /// and possibly leaving some space in accordance with the resize policy.
-    ///
-    /// If the current capacity is less than the lower limit, this is a no-op.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use cow_hashmap::CowHashMap as HashMap;
-    ///
-    /// let mut map: HashMap<i32, i32> = HashMap::with_capacity(100);
-    /// map.insert(1, 2);
-    /// map.insert(3, 4);
-    /// assert!(map.capacity() >= 100);
-    /// map.shrink_to(10);
-    /// assert!(map.capacity() >= 10);
-    /// map.shrink_to(0);
-    /// assert!(map.capacity() >= 2);
-    /// ```
-    #[inline]
-    pub fn shrink_to(&self, min_capacity: usize) {
-        self.base.shrink_to(min_capacity);
+    /// Grabs the shard that is relevant for this particular key
+    fn shard_mut<Q: ?Sized>(&self, key: &Q) -> CowValueGuard<base::CowHashMap<K, V, S>>
+    where Q: Hash + Eq,
+          S: Clone {
+        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
+        self
+            .base
+            .entry(shard1)
+            .or_insert_with(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
+            .entry(shard2)
+            .or_insert_with(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -766,8 +757,9 @@ where
     /// assert_eq!(letters.get(&'y'), None);
     /// ```
     #[inline]
-    pub fn entry(&self, key: K) -> Entry<'_, K, V, S> {
-        map_entry(self.base.entry(key))
+    pub fn entry(&self, key: K) -> Entry<K, V, S>
+    where S: Clone {
+        map_entry(self.shard_mut(&key).entry(key))
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -793,7 +785,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        self.base.get(k)
+        self.shard(k)?.get(k)
     }
 
     /// Returns the key-value pair corresponding to the supplied key.
@@ -819,7 +811,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        self.base.get_key_value(k)
+        self.shard(k)?.get_key_value(k)
     }
 
     /// Returns `true` if the map contains a value for the specified key.
@@ -844,7 +836,11 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        self.base.contains_key(k)
+        let map = self.shard(k);
+        match map {
+            Some(map) => map.contains_key(k),
+            None => false,
+        }
     }
 
     /// Returns a mutable reference to the value corresponding to the key.
@@ -869,10 +865,11 @@ where
     #[inline]
     pub fn get_mut<Q: ?Sized>(&self, k: &Q) -> Option<CowValueGuard<V>>
     where
+        S: Clone,
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        self.base.get_mut(k)
+        self.shard_mut(k).get_mut(k)
     }
 
     /// Inserts a key-value pair into the map.
@@ -900,8 +897,9 @@ where
     /// assert_eq!(*map.get(&37).unwrap(), "c");
     /// ```
     #[inline]
-    pub fn insert(&self, k: K, v: V) -> Option<CowValueGuard<V>> {
-        self.base.insert(k, v)
+    pub fn insert(&self, k: K, v: V) -> Option<CowValueGuard<V>>
+    where S: Clone {
+        self.shard_mut(&k).insert(k, v)
     }
 
     /// Tries to insert a key-value pair into the map, and returns
@@ -930,10 +928,13 @@ where
         &self,
         key: K,
         value: V,
-    ) -> Result<CowValueGuard<V>, OccupiedError<'_, K, V, S>> {
-        match self.entry(key) {
-            Occupied(entry) => Err(OccupiedError { entry, value }),
-            Vacant(entry) => Ok(entry.insert(value)),
+    ) -> Result<CowValueGuard<V>, OccupiedError<K, V, S>>
+    where S: Clone {
+        match self.shard_mut(&key).entry(key) {
+            cow_hashbrown::hash_map::Entry::Occupied(entry) => Err(OccupiedError { entry: OccupiedEntry {
+                base: entry
+            }, value }),
+            cow_hashbrown::hash_map::Entry::Vacant(entry) => Ok(entry.insert(value)),
         }
     }
 
@@ -960,8 +961,16 @@ where
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
+        S: Clone,
     {
-        self.base.remove(k)
+        let (shard, parent) = self.shard_and_parent(k)?;
+        let ret = shard.remove(k);
+
+        if shard.is_empty() {
+            parent.retain(|_, t| !t.is_empty());
+        }
+
+        ret
     }
 
     /// Removes a key from the map, returning the stored key and value if the
@@ -989,8 +998,16 @@ where
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
+        S: Clone
     {
-        self.base.remove_entry(k)
+        let (shard, parent) = self.shard_and_parent(k)?;
+        
+        let ret = shard.remove_entry(k);
+        if shard.is_empty() {
+            parent.retain(|_, t| !t.is_empty());
+        }
+
+        ret
     }
 }
 
@@ -1054,7 +1071,7 @@ where
     /// Creates an empty `HashMap<K, V, S>`, with the `Default` value for the hasher.
     #[inline]
     fn default() -> CowHashMap<K, V, S> {
-        CowHashMap::with_hasher(Default::default())
+        CowHashMap::<K, V, S>::with_hasher(Default::default())
     }
 }
 
@@ -1064,8 +1081,6 @@ where
 // (the hasher parameter, conventionally "S").
 // To that end, this impl is defined using RandomState as the concrete
 // type of S, rather than being generic over `S: BuildHasher + Default`.
-// It is expected that users who want to specify a hasher will manually use
-// `with_capacity_and_hasher`.
 // If type parameter defaults worked on impls, and if type parameter
 // defaults could be mixed with const generics, then perhaps
 // this could be generalized.
@@ -1105,20 +1120,24 @@ where
 /// ]);
 /// let iter = map.iter();
 /// ```
-pub struct Iter<'a, K: Clone, V> {
-    base: cow_hashbrown::hash_map::Iter<'a, K, V>,
+pub struct Iter<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::Iter<ShardIndex, ShardMap<K, V, S>>,
+    shard1: Option<cow_hashbrown::hash_map::Iter<ShardIndex, base::CowHashMap<K, V, S>>>,
+    shard2: Option<cow_hashbrown::hash_map::Iter<K, V>>,
 }
 
-impl<K: Clone, V> Clone for Iter<'_, K, V> {
+impl<K: Clone, V, S> Clone for Iter<K, V, S> {
     #[inline]
     fn clone(&self) -> Self {
         Iter {
             base: self.base.clone(),
+            shard1: None,
+            shard2: None
         }
     }
 }
 
-impl<K: Clone + Debug, V: Debug> fmt::Debug for Iter<'_, K, V> {
+impl<K: Clone + Debug, V: Debug, S> fmt::Debug for Iter<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.clone()).finish()
     }
@@ -1141,16 +1160,20 @@ impl<K: Clone + Debug, V: Debug> fmt::Debug for Iter<'_, K, V> {
 /// ]);
 /// let iter = map.iter_mut();
 /// ```
-pub struct IterMut<'a, K: Clone + 'a, V: 'a> {
-    base: cow_hashbrown::hash_map::IterMut<'a, K, V>,
+pub struct IterMut<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::Iter<ShardIndex, ShardMap<K, V, S>>,
+    shard1: Option<cow_hashbrown::hash_map::Iter<ShardIndex, base::CowHashMap<K, V, S>>>,
+    shard2: Option<cow_hashbrown::hash_map::IterMut<K, V>>,
 }
 
-impl<'a, K: Clone, V> IterMut<'a, K, V> {
+impl<K: Clone, V, S> IterMut<K, V, S> {
     /// Returns an iterator of references over the remaining items.
     #[inline]
-    pub fn iter(&self) -> Iter<'_, K, V> {
+    pub fn iter(&self) -> Iter<K, V, S> {
         Iter {
-            base: self.base.iter(),
+            base: self.base.clone(),
+            shard1: None,
+            shard2: None,
         }
     }
 }
@@ -1172,16 +1195,21 @@ impl<'a, K: Clone, V> IterMut<'a, K, V> {
 /// ]);
 /// let iter = map.into_iter();
 /// ```
-pub struct IntoIter<K: Clone, V> {
-    base: cow_hashbrown::hash_map::IntoIter<K, V>,
+pub struct IntoIter<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::Iter<ShardIndex, ShardMap<K, V, S>>,
+    shard1: Option<cow_hashbrown::hash_map::Iter<ShardIndex, base::CowHashMap<K, V, S>>>,
+    shard2: Option<cow_hashbrown::hash_map::Iter<K, V>>,
+
 }
 
-impl<K: Clone, V> IntoIter<K, V> {
+impl<K: Clone, V, S> IntoIter<K, V, S> {
     /// Returns an iterator of references over the remaining items.
     #[inline]
-    pub fn iter(&self) -> Iter<'_, K, V> {
+    pub fn iter(&self) -> Iter<K, V, S> {
         Iter {
-            base: self.base.iter(),
+            base: self.base.clone(),
+            shard1: None,
+            shard2: None,
         }
     }
 }
@@ -1203,11 +1231,11 @@ impl<K: Clone, V> IntoIter<K, V> {
 /// ]);
 /// let iter_keys = map.keys();
 /// ```
-pub struct Keys<'a, K: Clone + 'a, V: 'a> {
-    inner: Iter<'a, K, V>,
+pub struct Keys<K: Clone, V, S> {
+    inner: Iter<K, V, S>,
 }
 
-impl<K: Clone, V> Clone for Keys<'_, K, V> {
+impl<K: Clone, V, S> Clone for Keys<K, V, S> {
     #[inline]
     fn clone(&self) -> Self {
         Keys {
@@ -1216,7 +1244,7 @@ impl<K: Clone, V> Clone for Keys<'_, K, V> {
     }
 }
 
-impl<K: Clone + Debug, V> fmt::Debug for Keys<'_, K, V> {
+impl<K: Clone + Debug, V, S> fmt::Debug for Keys<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.clone()).finish()
     }
@@ -1239,11 +1267,11 @@ impl<K: Clone + Debug, V> fmt::Debug for Keys<'_, K, V> {
 /// ]);
 /// let iter_values = map.values();
 /// ```
-pub struct Values<'a, K: Clone + 'a, V: 'a> {
-    inner: Iter<'a, K, V>,
+pub struct Values<K: Clone, V, S> {
+    inner: Iter<K, V, S>,
 }
 
-impl<K: Clone, V> Clone for Values<'_, K, V> {
+impl<K: Clone, V, S> Clone for Values<K, V, S> {
     #[inline]
     fn clone(&self) -> Self {
         Values {
@@ -1252,7 +1280,7 @@ impl<K: Clone, V> Clone for Values<'_, K, V> {
     }
 }
 
-impl<K: Clone, V: Debug> fmt::Debug for Values<'_, K, V> {
+impl<K: Clone, V: Debug, S> fmt::Debug for Values<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.clone()).finish()
     }
@@ -1275,16 +1303,20 @@ impl<K: Clone, V: Debug> fmt::Debug for Values<'_, K, V> {
 /// ]);
 /// let iter = map.drain();
 /// ```
-pub struct Drain<'a, K: Clone + 'a, V: 'a> {
-    base: cow_hashbrown::hash_map::Iter<'a, K, V>,
+pub struct Drain<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::Iter<ShardIndex, ShardMap<K, V, S>>,
+    shard1: Option<cow_hashbrown::hash_map::Iter<ShardIndex, base::CowHashMap<K, V, S>>>,
+    shard2: Option<cow_hashbrown::hash_map::Iter<K, V>>,
 }
 
-impl<'a, K: Clone, V> Drain<'a, K, V> {
+impl<'a, K: Clone, V, S> Drain<K, V, S> {
     /// Returns an iterator of references over the remaining items.
     #[inline]
-    pub fn iter(&self) -> Iter<'_, K, V> {
+    pub fn iter(&self) -> Iter<K, V, S> {
         Iter {
             base: self.base.clone(),
+            shard1: None,
+            shard2: None,
         }
     }
 }
@@ -1306,8 +1338,8 @@ impl<'a, K: Clone, V> Drain<'a, K, V> {
 /// ]);
 /// let iter_values = map.values_mut();
 /// ```
-pub struct ValuesMut<'a, K: Clone + 'a, V: 'a> {
-    inner: IterMut<'a, K, V>,
+pub struct ValuesMut<K: Clone, V, S> {
+    inner: IterMut<K, V, S>,
 }
 
 /// An owning iterator over the keys of a `HashMap`.
@@ -1327,8 +1359,8 @@ pub struct ValuesMut<'a, K: Clone + 'a, V: 'a> {
 /// ]);
 /// let iter_keys = map.into_keys();
 /// ```
-pub struct IntoKeys<K: Clone, V> {
-    inner: IntoIter<K, V>,
+pub struct IntoKeys<K: Clone, V, S> {
+    inner: IntoIter<K, V, S>,
 }
 
 /// An owning iterator over the values of a `HashMap`.
@@ -1348,8 +1380,8 @@ pub struct IntoKeys<K: Clone, V> {
 /// ]);
 /// let iter_keys = map.into_values();
 /// ```
-pub struct IntoValues<K: Clone, V> {
-    inner: IntoIter<K, V>,
+pub struct IntoValues<K: Clone, V, S> {
+    inner: IntoIter<K, V, S>,
 }
 
 /// A view into a single entry in a map, which may either be vacant or occupied.
@@ -1357,15 +1389,15 @@ pub struct IntoValues<K: Clone, V> {
 /// This `enum` is constructed from the [`entry`] method on [`HashMap`].
 ///
 /// [`entry`]: HashMap::entry
-pub enum Entry<'a, K: Clone + 'a, V: 'a, S> {
+pub enum Entry<K: Clone, V, S> {
     /// An occupied entry.
-    Occupied(OccupiedEntry<'a, K, V, S>),
+    Occupied(OccupiedEntry<K, V, S>),
 
     /// A vacant entry.
-    Vacant(VacantEntry<'a, K, V, S>),
+    Vacant(VacantEntry<K, V, S>),
 }
 
-impl<K: Clone + Debug, V: Debug, S> Debug for Entry<'_, K, V, S> {
+impl<K: Clone + Debug, V: Debug, S> Debug for Entry<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
             Vacant(ref v) => f.debug_tuple("Entry").field(v).finish(),
@@ -1376,11 +1408,11 @@ impl<K: Clone + Debug, V: Debug, S> Debug for Entry<'_, K, V, S> {
 
 /// A view into an occupied entry in a `HashMap`.
 /// It is part of the [`Entry`] enum.
-pub struct OccupiedEntry<'a, K: Clone + 'a, V: 'a, S> {
-    base: cow_hashbrown::hash_map::OccupiedEntry<'a, K, V, S>,
+pub struct OccupiedEntry<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::OccupiedEntry<K, V, S>,
 }
 
-impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedEntry<'_, K, V, S> {
+impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedEntry<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedEntry")
             .field("key", self.key())
@@ -1391,11 +1423,11 @@ impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedEntry<'_, K, V, S> {
 
 /// A view into a vacant entry in a `HashMap`.
 /// It is part of the [`Entry`] enum.
-pub struct VacantEntry<'a, K: Clone + 'a, V: 'a, S> {
-    base: cow_hashbrown::hash_map::VacantEntry<'a, K, V, S>,
+pub struct VacantEntry<K: Clone, V, S> {
+    base: cow_hashbrown::hash_map::VacantEntry<K, V, S>,
 }
 
-impl<K: Clone + Debug, V, S> Debug for VacantEntry<'_, K, V, S> {
+impl<K: Clone + Debug, V, S> Debug for VacantEntry<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_tuple("VacantEntry").field(self.key()).finish()
     }
@@ -1404,14 +1436,14 @@ impl<K: Clone + Debug, V, S> Debug for VacantEntry<'_, K, V, S> {
 /// The error returned by [`try_insert`](HashMap::try_insert) when the key already exists.
 ///
 /// Contains the occupied entry, and the value that was not inserted.
-pub struct OccupiedError<'a, K: Clone + 'a, V: 'a, S> {
+pub struct OccupiedError<K: Clone, V, S> {
     /// The entry in the map that was already occupied.
-    pub entry: OccupiedEntry<'a, K, V, S>,
+    pub entry: OccupiedEntry<K, V, S>,
     /// The value which was not inserted, because the entry was already occupied.
     pub value: V,
 }
 
-impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedError<'_, K, V, S> {
+impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedError<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OccupiedError")
             .field("key", self.entry.key())
@@ -1421,7 +1453,7 @@ impl<K: Clone + Debug, V: Debug, S> Debug for OccupiedError<'_, K, V, S> {
     }
 }
 
-impl<'a, K: Clone + Debug, V: Debug, S> fmt::Display for OccupiedError<'a, K, V, S> {
+impl<K: Clone + Debug, V: Debug, S> fmt::Display for OccupiedError<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
@@ -1433,36 +1465,47 @@ impl<'a, K: Clone + Debug, V: Debug, S> fmt::Display for OccupiedError<'a, K, V,
     }
 }
 
-impl<'a, K: Clone + fmt::Debug, V: fmt::Debug, S> Error for OccupiedError<'a, K, V, S> {
+impl<K: Clone + fmt::Debug, V: fmt::Debug, S> Error for OccupiedError<K, V, S> {
     #[allow(deprecated)]
     fn description(&self) -> &str {
         "key already exists"
     }
 }
 
-impl<'a, K: Clone, V, S> IntoIterator for &'a CowHashMap<K, V, S> {
+impl<K: Clone, V, S> IntoIterator for &CowHashMap<K, V, S>
+where S: Clone {
     type Item = (K, Arc<V>);
-    type IntoIter = Iter<'a, K, V>;
+    type IntoIter = IntoIter<K, V, S>;
 
     #[inline]
-    fn into_iter(self) -> Iter<'a, K, V> {
-        self.iter()
+    fn into_iter(self) -> IntoIter<K, V, S> {
+        IntoIter {
+            base: self.base.iter(),
+            shard1: None,
+            shard2: None,
+        }
     }
 }
 
-impl<'a, K: Clone, V, S> IntoIterator for &'a mut CowHashMap<K, V, S> {
-    type Item = (K, CowValueGuard<V>);
-    type IntoIter = IterMut<'a, K, V>;
+impl<K: Clone, V, S> IntoIterator for &mut CowHashMap<K, V, S>
+where S: Clone {
+    type Item = (K, Arc<V>);
+    type IntoIter = IntoIter<K, V, S>;
 
     #[inline]
-    fn into_iter(self) -> IterMut<'a, K, V> {
-        self.iter_mut()
+    fn into_iter(self) -> IntoIter<K, V, S> {
+        IntoIter {
+            base: self.base.iter(),
+            shard1: None,
+            shard2: None,
+        }
     }
 }
 
-impl<K: Clone, V, S> IntoIterator for CowHashMap<K, V, S> {
+impl<K: Clone, V, S> IntoIterator for CowHashMap<K, V, S>
+where S: Clone {
     type Item = (K, Arc<V>);
-    type IntoIter = IntoIter<K, V>;
+    type IntoIter = IntoIter<K, V, S>;
 
     /// Creates a consuming iterator, that is, one that moves each key-value
     /// pair out of the map in arbitrary order. The map cannot be used after
@@ -1484,63 +1527,103 @@ impl<K: Clone, V, S> IntoIterator for CowHashMap<K, V, S> {
     /// let vec: Vec<(&str, Arc<i32>)> = map.into_iter().collect();
     /// ```
     #[inline]
-    fn into_iter(self) -> IntoIter<K, V> {
+    fn into_iter(self) -> IntoIter<K, V, S> {
         IntoIter {
-            base: self.base.into_iter(),
+            base: self.base.iter(),
+            shard1: None,
+            shard2: None,
         }
     }
 }
 
-impl<'a, K: Clone, V> Iterator for Iter<'a, K, V> {
+impl<K: Clone, V, S> Iterator for Iter<K, V, S> {
     type Item = (K, Arc<V>);
 
     #[inline]
     fn next(&mut self) -> Option<(K, Arc<V>)> {
-        self.base.next()
-    }
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.base.size_hint()
+        loop {
+            if let Some(ref mut shard2) = self.shard2 {
+                if let Some(r) = shard2.next() {
+                    return Some(r);
+                }
+                self.shard2.take();
+            }
+            if let Some(ref mut shard1) = self.shard1 {
+                if let Some(r) = shard1.next() {
+                    self.shard2.replace(r.1.iter());
+                    continue;
+                }
+                self.shard1.take();
+            }
+            if let Some(next) = self.base.next() {
+                self.shard1.replace(next.1.iter());
+                continue;
+            }
+            return None;
+        }
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> ExactSizeIterator for Iter<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for Iter<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
 
-impl<K: Clone, V> FusedIterator for Iter<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for Iter<K, V, S> {}
 
-impl<'a, K: Clone, V> Iterator for IterMut<'a, K, V> {
+impl<K: Clone, V, S> Iterator for IterMut<K, V, S> {
     type Item = (K, CowValueGuard<V>);
 
     #[inline]
     fn next(&mut self) -> Option<(K, CowValueGuard<V>)> {
-        self.base.next()
-    }
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.base.size_hint()
+        loop {
+            if let Some(ref mut shard2) = self.shard2 {
+                if let Some(r) = shard2.next() {
+                    return Some(r);
+                }
+                self.shard2.take();
+            }
+            if let Some(ref mut shard1) = self.shard1 {
+                if let Some(r) = shard1.next() {
+                    self.shard2.replace(r.1.iter_mut());
+                    continue;
+                }
+                self.shard1.take();
+            }
+            if let Some(next) = self.base.next() {
+                self.shard1.replace(next.1.iter());
+                continue;
+            }
+            return None;
+        }
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> ExactSizeIterator for IterMut<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for IterMut<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> FusedIterator for IterMut<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for IterMut<K, V, S> {}
 
-impl<K: Clone, V> fmt::Debug for IterMut<'_, K, V>
+impl<K: Clone, V, S> fmt::Debug for IterMut<K, V, S>
 where
     K: fmt::Debug,
     V: fmt::Debug,
@@ -1550,37 +1633,60 @@ where
     }
 }
 
-impl<K: Clone, V> Iterator for IntoIter<K, V> {
+impl<K: Clone, V, S> Iterator for IntoIter<K, V, S>
+where S: Clone
+{
     type Item = (K, Arc<V>);
 
     #[inline]
     fn next(&mut self) -> Option<(K, Arc<V>)> {
-        self.base.next()
-    }
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.base.size_hint()
+        loop {
+            if let Some(ref mut shard2) = self.shard2 {
+                if let Some(r) = shard2.next() {
+                    return Some(r);
+                }
+                self.shard2.take();
+            }
+            if let Some(ref mut shard1) = self.shard1 {
+                if let Some(r) = shard1.next() {
+                    self.shard2.replace(r.1.iter());
+                    continue;
+                }
+                self.shard1.take();
+            }
+            if let Some(next) = self.base.next() {
+                self.shard1.replace(next.1.iter());
+                continue;
+            }
+            return None;
+        }
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> ExactSizeIterator for IntoIter<K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for IntoIter<K, V, S>
+where S: Clone {
     #[inline]
     fn len(&self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> FusedIterator for IntoIter<K, V> {}
+impl<K: Clone, V, S> FusedIterator for IntoIter<K, V, S>
+where S: Clone {}
 
-impl<K: Clone + Debug, V: Debug> fmt::Debug for IntoIter<K, V> {
+impl<K: Clone + Debug, V: Debug, S> fmt::Debug for IntoIter<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list().entries(self.iter()).finish()
     }
 }
 
-impl<'a, K: Clone, V> Iterator for Keys<'a, K, V> {
+impl<K: Clone, V, S> Iterator for Keys<K, V, S> {
     type Item = K;
 
     #[inline]
@@ -1604,15 +1710,15 @@ impl<'a, K: Clone, V> Iterator for Keys<'a, K, V> {
         self.inner.fold(init, |acc, (k, _)| f(acc, k))
     }
 }
-impl<K: Clone, V> ExactSizeIterator for Keys<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for Keys<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V> FusedIterator for Keys<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for Keys<K, V, S> {}
 
-impl<'a, K: Clone, V> Iterator for Values<'a, K, V> {
+impl<K: Clone, V, S> Iterator for Values<K, V, S> {
     type Item = Arc<V>;
 
     #[inline]
@@ -1636,15 +1742,15 @@ impl<'a, K: Clone, V> Iterator for Values<'a, K, V> {
         self.inner.fold(init, |acc, (_, v)| f(acc, v))
     }
 }
-impl<K: Clone, V> ExactSizeIterator for Values<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for Values<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V> FusedIterator for Values<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for Values<K, V, S> {}
 
-impl<'a, K: Clone, V> Iterator for ValuesMut<'a, K, V> {
+impl<K: Clone, V, S> Iterator for ValuesMut<K, V, S> {
     type Item = CowValueGuard<V>;
 
     #[inline]
@@ -1668,15 +1774,15 @@ impl<'a, K: Clone, V> Iterator for ValuesMut<'a, K, V> {
         self.inner.fold(init, |acc, (_, v)| f(acc, v))
     }
 }
-impl<K: Clone, V> ExactSizeIterator for ValuesMut<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for ValuesMut<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V> FusedIterator for ValuesMut<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for ValuesMut<K, V, S> {}
 
-impl<K: Clone, V: fmt::Debug> fmt::Debug for ValuesMut<'_, K, V> {
+impl<K: Clone, V: fmt::Debug, S> fmt::Debug for ValuesMut<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list()
             .entries(self.inner.iter().map(|(_, val)| val))
@@ -1684,7 +1790,8 @@ impl<K: Clone, V: fmt::Debug> fmt::Debug for ValuesMut<'_, K, V> {
     }
 }
 
-impl<K: Clone, V> Iterator for IntoKeys<K, V> {
+impl<K: Clone, V, S> Iterator for IntoKeys<K, V, S>
+where S: Clone {
     type Item = K;
 
     #[inline]
@@ -1708,15 +1815,17 @@ impl<K: Clone, V> Iterator for IntoKeys<K, V> {
         self.inner.fold(init, |acc, (k, _)| f(acc, k))
     }
 }
-impl<K: Clone, V> ExactSizeIterator for IntoKeys<K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for IntoKeys<K, V, S>
+where S: Clone {
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V> FusedIterator for IntoKeys<K, V> {}
+impl<K: Clone, V, S> FusedIterator for IntoKeys<K, V, S>
+where S: Clone {}
 
-impl<K: Clone + Debug, V> fmt::Debug for IntoKeys<K, V> {
+impl<K: Clone + Debug, V, S> fmt::Debug for IntoKeys<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list()
             .entries(self.inner.iter().map(|(k, _)| k))
@@ -1724,7 +1833,8 @@ impl<K: Clone + Debug, V> fmt::Debug for IntoKeys<K, V> {
     }
 }
 
-impl<K: Clone, V> Iterator for IntoValues<K, V> {
+impl<K: Clone, V, S> Iterator for IntoValues<K, V, S>
+where S: Clone {
     type Item = Arc<V>;
 
     #[inline]
@@ -1748,15 +1858,17 @@ impl<K: Clone, V> Iterator for IntoValues<K, V> {
         self.inner.fold(init, |acc, (_, v)| f(acc, v))
     }
 }
-impl<K: Clone, V> ExactSizeIterator for IntoValues<K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for IntoValues<K, V, S>
+where S: Clone {
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V> FusedIterator for IntoValues<K, V> {}
+impl<K: Clone, V, S> FusedIterator for IntoValues<K, V, S>
+where S: Clone {}
 
-impl<K: Clone, V: Debug> fmt::Debug for IntoValues<K, V> {
+impl<K: Clone, V: Debug, S> fmt::Debug for IntoValues<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_list()
             .entries(self.inner.iter().map(|(_, v)| v))
@@ -1764,35 +1876,44 @@ impl<K: Clone, V: Debug> fmt::Debug for IntoValues<K, V> {
     }
 }
 
-impl<'a, K: Clone, V> Iterator for Drain<'a, K, V> {
+impl<'a, K: Clone, V, S> Iterator for Drain<K, V, S> {
     type Item = (K, Arc<V>);
 
     #[inline]
     fn next(&mut self) -> Option<(K, Arc<V>)> {
-        self.base.next()
-    }
-    #[inline]
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        self.base.size_hint()
-    }
-    #[inline]
-    fn fold<B, F>(self, init: B, f: F) -> B
-    where
-        Self: Sized,
-        F: FnMut(B, Self::Item) -> B,
-    {
-        self.base.fold(init, f)
+        loop {
+            if let Some(ref mut shard2) = self.shard2 {
+                if let Some(r) = shard2.next() {
+                    return Some(r);
+                }
+                self.shard2.take();
+            }
+            if let Some(ref mut shard1) = self.shard1 {
+                if let Some(r) = shard1.next() {
+                    self.shard2.replace(r.1.iter());
+                    continue;
+                }
+                self.shard1.take();
+            }
+            if let Some(next) = self.base.next() {
+                self.shard1.replace(next.1.iter());
+                continue;
+            }
+            return None;
+        }
     }
 }
-impl<K: Clone, V> ExactSizeIterator for Drain<'_, K, V> {
+impl<K: Clone, V, S> ExactSizeIterator for Drain<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
-        self.base.len()
+        self.base.clone().map(|(_, t)| {
+            t.iter().map(|(_, t)| t.len()).sum::<usize>()
+        }).sum()
     }
 }
-impl<K: Clone, V> FusedIterator for Drain<'_, K, V> {}
+impl<K: Clone, V, S> FusedIterator for Drain<K, V, S> {}
 
-impl<K: Clone, V> fmt::Debug for Drain<'_, K, V>
+impl<K: Clone, V, S> fmt::Debug for Drain<K, V, S>
 where
     K: fmt::Debug,
     V: fmt::Debug,
@@ -1802,7 +1923,7 @@ where
     }
 }
 
-impl<'a, K: Clone, V, S> Entry<'a, K, V, S> {
+impl<K: Clone, V, S> Entry<K, V, S> {
     /// Ensures a value is in the entry by inserting the default if empty, and returns
     /// a mutable reference to the value in the entry.
     ///
@@ -1858,6 +1979,37 @@ impl<'a, K: Clone, V, S> Entry<'a, K, V, S> {
             Occupied(entry) => entry.into_mut(),
             Vacant(entry) => entry.insert(default()),
         }
+    }
+
+    /// Ensures a value is in the entry by trying to insert the result of function if empty,
+    /// and returns a mutable reference to the value in the entry if that function was
+    /// successful.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_try_insert_with(|| Some(value)).unwrap();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_try_insert_with<F: FnOnce() -> Option<V>>(self, f: F) -> Option<CowValueGuard<V>>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        Some(
+            match self {
+                Occupied(entry) => entry.into_mut(),
+                Vacant(entry) => entry.insert(f()?),
+            }
+        )
     }
 
     /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
@@ -1947,7 +2099,7 @@ impl<'a, K: Clone, V, S> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Clone, V: Default, S> Entry<'a, K, V, S> {
+impl<K: Clone, V: Default, S> Entry<K, V, S> {
     /// Ensures a value is in the entry by inserting the default value if empty,
     /// and returns a mutable reference to the value in the entry.
     ///
@@ -1977,7 +2129,7 @@ impl<'a, K: Clone, V: Default, S> Entry<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Clone, V, S> OccupiedEntry<'a, K, V, S> {
+impl<K: Clone, V, S> OccupiedEntry<K, V, S> {
     /// Gets a reference to the key in the entry.
     ///
     /// # Examples
@@ -2171,7 +2323,7 @@ impl<'a, K: Clone, V, S> OccupiedEntry<'a, K, V, S> {
     }
 }
 
-impl<'a, K: Clone + 'a, V: 'a, S> VacantEntry<'a, K, V, S> {
+impl<K: Clone, V, S> VacantEntry<K, V, S> {
     /// Gets a reference to the key that would be used when inserting a value
     /// through the `VacantEntry`.
     ///
@@ -2237,7 +2389,7 @@ impl<'a, K: Clone + 'a, V: 'a, S> VacantEntry<'a, K, V, S> {
 impl<K: Clone, V, S> FromIterator<(K, V)> for CowHashMap<K, V, S>
 where
     K: Eq + Hash,
-    S: BuildHasher + Default,
+    S: BuildHasher + Clone + Default,
 {
     fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> CowHashMap<K, V, S> {
         let mut map = CowHashMap::with_hasher(Default::default());
@@ -2251,30 +2403,34 @@ where
 impl<K: Clone, V, S> Extend<(K, V)> for CowHashMap<K, V, S>
 where
     K: Eq + Hash,
-    S: BuildHasher,
+    S: BuildHasher + Clone,
 {
     #[inline]
     fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
-        self.base.extend(iter)
+        for (k, v) in iter {
+            self.shard_mut(&k).insert(k, v);
+        }
     }
 }
 
 impl<'a, K: Clone, V, S> Extend<(&'a K, &'a V)> for CowHashMap<K, V, S>
 where
-    K: Eq + Hash + Copy,
-    V: Copy,
-    S: BuildHasher,
+    K: Eq + Hash,
+    V: Clone,
+    S: BuildHasher + Clone,
 {
     #[inline]
     fn extend<T: IntoIterator<Item = (&'a K, &'a V)>>(&mut self, iter: T) {
-        self.base.extend(iter)
+        for (k, v) in iter {
+            self.shard_mut(k).insert(k.clone(), v.clone());
+        }
     }
 }
 
 #[inline]
-fn map_entry<'a, K: Clone + 'a, V: 'a, S>(
-    raw: cow_hashbrown::hash_map::Entry<'a, K, V, S>,
-) -> Entry<'a, K, V, S> {
+fn map_entry<K: Clone, V, S>(
+    raw: cow_hashbrown::hash_map::Entry<K, V, S>,
+) -> Entry<K, V, S> {
     match raw {
         cow_hashbrown::hash_map::Entry::Occupied(base) => Entry::Occupied(OccupiedEntry { base }),
         cow_hashbrown::hash_map::Entry::Vacant(base) => Entry::Vacant(VacantEntry { base }),
