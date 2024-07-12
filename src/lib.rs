@@ -27,7 +27,10 @@ struct ShardIndex {
     hash: u16,
 }
 
-fn key_shards<K: Hash + ?Sized, S: BuildHasher, const N1: u64, const N2: u64>(key: &K, hash_builder: &S) -> (ShardIndex, ShardIndex) {
+fn key_shards<K: Hash + ?Sized, S: BuildHasher, const N1: u64, const N2: u64>(
+    key: &K,
+    hash_builder: &S,
+) -> (ShardIndex, ShardIndex) {
     let mut state = hash_builder.build_hasher();
     key.hash(&mut state);
     let hash1 = state.finish();
@@ -35,8 +38,14 @@ fn key_shards<K: Hash + ?Sized, S: BuildHasher, const N1: u64, const N2: u64>(ke
     key.hash(&mut state);
     let hash2 = state.finish();
 
-    (ShardIndex { hash: (hash1 % DEFAULT_SHARD_LEVEL1_SIZE) as u16 },
-     ShardIndex { hash: (hash2 % DEFAULT_SHARD_LEVEL2_SIZE) as u16 })
+    (
+        ShardIndex {
+            hash: (hash1 % DEFAULT_SHARD_LEVEL1_SIZE) as u16,
+        },
+        ShardIndex {
+            hash: (hash2 % DEFAULT_SHARD_LEVEL2_SIZE) as u16,
+        },
+    )
 }
 
 type ShardMap<K, V, S> = base::CowHashMap<ShardIndex, base::CowHashMap<K, V, S>, S>;
@@ -235,7 +244,7 @@ type ShardMap<K, V, S> = base::CowHashMap<ShardIndex, base::CowHashMap<K, V, S>,
 /// ```
 
 pub struct CowHashMap<K: Clone, V, S = RandomState> {
-    base: base::CowHashMap<ShardIndex, ShardMap<K,V, S>, S>,
+    base: base::CowHashMap<ShardIndex, ShardMap<K, V, S>, S>,
 }
 
 impl<K: Clone, V> CowHashMap<K, V, RandomState> {
@@ -343,7 +352,9 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
     pub fn into_keys(self) -> IntoKeys<K, V, S>
-    where S: Clone {
+    where
+        S: Clone,
+    {
         IntoKeys {
             inner: self.into_iter(),
         }
@@ -438,7 +449,9 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// instead of O(len) because it internally visits empty buckets too.
     #[inline]
     pub fn into_values(self) -> IntoValues<K, V, S>
-    where S: Clone {
+    where
+        S: Clone,
+    {
         IntoValues {
             inner: self.into_iter(),
         }
@@ -525,9 +538,10 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     /// assert_eq!(a.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
-        self.base.iter().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .iter()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 
     /// Returns `true` if the map contains no elements.
@@ -547,9 +561,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
         if self.base.is_empty() {
             return true;
         }
-        self.base
-            .iter()
-            .all(|(_, t)| t.is_empty())
+        self.base.iter().all(|(_, t)| t.is_empty())
     }
 
     /// Clears the map, returning all key-value pairs as an iterator. Keeps the
@@ -581,7 +593,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
         let ret = Drain {
             base: self.base.drain(),
             shard1: None,
-            shard2: None
+            shard2: None,
         };
         ret
     }
@@ -612,9 +624,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
         V: Clone,
         S: Clone,
     {
-        let mut f = move |k: &K, v: &V| -> bool {
-            f(k, v)
-        };
+        let mut f = move |k: &K, v: &V| -> bool { f(k, v) };
         for shard1 in self.base.values() {
             for shard2 in shard1.values() {
                 shard2.retain(&mut f);
@@ -649,9 +659,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
         V: Clone,
         S: Clone,
     {
-        let mut f = move |k: &K, v: &mut V| -> bool {
-            f(k, v)
-        };
+        let mut f = move |k: &K, v: &mut V| -> bool { f(k, v) };
         for shard1 in self.base.values() {
             for shard2 in shard1.values() {
                 shard2.retain_mut(&mut f);
@@ -703,38 +711,56 @@ where
 {
     /// Grabs the shard that is relevant for this particular key
     fn shard<Q: ?Sized>(&self, key: &Q) -> Option<Arc<base::CowHashMap<K, V, S>>>
-    where Q: Hash + Eq {
-        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
-        self
-            .base
-            .get(&shard1)?
-            .get(&shard2)
+    where
+        Q: Hash + Eq,
+    {
+        let (shard1, shard2) =
+            key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(
+                key,
+                self.base.hasher(),
+            );
+        self.base.get(&shard1)?.get(&shard2)
     }
 
-    fn shard_and_parent<Q: ?Sized>(&self, key: &Q) -> Option<(Arc<base::CowHashMap<K, V, S>>, Arc<cow_hashbrown::CowHashMap<ShardIndex, cow_hashbrown::CowHashMap<K, V, S>, S>>)>
-    where Q: Hash + Eq {
-        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
-        let parent = self
-            .base
-            .get(&shard1)?;
+    fn shard_and_parent<Q: ?Sized>(
+        &self,
+        key: &Q,
+    ) -> Option<(
+        Arc<base::CowHashMap<K, V, S>>,
+        Arc<cow_hashbrown::CowHashMap<ShardIndex, cow_hashbrown::CowHashMap<K, V, S>, S>>,
+    )>
+    where
+        Q: Hash + Eq,
+    {
+        let (shard1, shard2) =
+            key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(
+                key,
+                self.base.hasher(),
+            );
+        let parent = self.base.get(&shard1)?;
 
-        let ret = parent
-            .get(&shard2)?;
+        let ret = parent.get(&shard2)?;
 
         Some((ret, parent))
     }
 
     /// Grabs the shard that is relevant for this particular key
     fn shard_mut<Q: ?Sized>(&self, key: &Q) -> CowValueGuard<base::CowHashMap<K, V, S>>
-    where Q: Hash + Eq,
-          S: Clone {
-        let (shard1, shard2) = key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(key, self.base.hasher());
-        self
-            .base
+    where
+        Q: Hash + Eq,
+        S: Clone,
+    {
+        let (shard1, shard2) =
+            key_shards::<Q, S, DEFAULT_SHARD_LEVEL1_SIZE, DEFAULT_SHARD_LEVEL2_SIZE>(
+                key,
+                self.base.hasher(),
+            );
+
+        self.base
             .entry(shard1)
-            .or_insert_with(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
+            .or_insert_with_mut(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
             .entry(shard2)
-            .or_insert_with(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
+            .or_insert_with_mut(|| base::CowHashMap::with_hasher(self.base.hasher().clone()))
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -758,7 +784,9 @@ where
     /// ```
     #[inline]
     pub fn entry(&self, key: K) -> Entry<K, V, S>
-    where S: Clone {
+    where
+        S: Clone,
+    {
         map_entry(self.shard_mut(&key).entry(key))
     }
 
@@ -868,6 +896,7 @@ where
         S: Clone,
         K: Borrow<Q>,
         Q: Hash + Eq,
+        V: Clone,
     {
         self.shard_mut(k).get_mut(k)
     }
@@ -897,9 +926,44 @@ where
     /// assert_eq!(*map.get(&37).unwrap(), "c");
     /// ```
     #[inline]
-    pub fn insert(&self, k: K, v: V) -> Option<CowValueGuard<V>>
-    where S: Clone {
+    pub fn insert(&self, k: K, v: V) -> Option<Arc<V>>
+    where
+        S: Clone,
+    {
         self.shard_mut(&k).insert(k, v)
+    }
+
+    /// Inserts a key-value pair into the map.
+    ///
+    /// If the map did not have this key present, [`None`] is returned.
+    ///
+    /// If the map did have this key present, the value is updated, and the old
+    /// value is returned. The key is not updated, though; this matters for
+    /// types that can be `==` without being identical. See the [module-level
+    /// documentation] for more.
+    ///
+    /// [module-level documentation]: crate::collections#insert-and-complex-keys
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    ///
+    /// let mut map = HashMap::new();
+    /// assert_eq!(map.insert(37, "a"), None);
+    /// assert_eq!(map.is_empty(), false);
+    ///
+    /// map.insert(37, "b");
+    /// assert_eq!(*map.insert(37, "c").unwrap(), "b");
+    /// assert_eq!(*map.get(&37).unwrap(), "c");
+    /// ```
+    #[inline]
+    pub fn insert_mut(&self, k: K, v: V) -> Option<CowValueGuard<V>>
+    where
+        S: Clone,
+        V: Clone,
+    {
+        self.shard_mut(&k).insert_mut(k, v)
     }
 
     /// Tries to insert a key-value pair into the map, and returns
@@ -924,17 +988,56 @@ where
     /// assert_eq!(err.entry.get(), Arc::new("a"));
     /// assert_eq!(err.value, "b");
     /// ```
-    pub fn try_insert(
+    pub fn try_insert(&self, key: K, value: V) -> Result<Arc<V>, OccupiedError<K, V, S>>
+    where
+        S: Clone,
+    {
+        match self.shard_mut(&key).entry(key) {
+            cow_hashbrown::hash_map::Entry::Occupied(entry) => Err(OccupiedError {
+                entry: OccupiedEntry { base: entry },
+                value,
+            }),
+            cow_hashbrown::hash_map::Entry::Vacant(entry) => Ok(entry.insert(value)),
+        }
+    }
+
+    /// Tries to insert a key-value pair into the map, and returns
+    /// a mutable reference to the value in the entry.
+    ///
+    /// If the map already had this key present, nothing is updated, and
+    /// an error containing the occupied entry and the value is returned.
+    ///
+    /// # Examples
+    ///
+    /// Basic usage:
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// assert_eq!(**map.try_insert(37, "a").unwrap(), *"a");
+    ///
+    /// let err = map.try_insert(37, "b").unwrap_err();
+    /// assert_eq!(err.entry.key(), &37);
+    /// assert_eq!(err.entry.get(), Arc::new("a"));
+    /// assert_eq!(err.value, "b");
+    /// ```
+    pub fn try_insert_mut(
         &self,
         key: K,
         value: V,
     ) -> Result<CowValueGuard<V>, OccupiedError<K, V, S>>
-    where S: Clone {
+    where
+        S: Clone,
+        V: Clone,
+    {
         match self.shard_mut(&key).entry(key) {
-            cow_hashbrown::hash_map::Entry::Occupied(entry) => Err(OccupiedError { entry: OccupiedEntry {
-                base: entry
-            }, value }),
-            cow_hashbrown::hash_map::Entry::Vacant(entry) => Ok(entry.insert(value)),
+            cow_hashbrown::hash_map::Entry::Occupied(entry) => Err(OccupiedError {
+                entry: OccupiedEntry { base: entry },
+                value,
+            }),
+            cow_hashbrown::hash_map::Entry::Vacant(entry) => Ok(entry.insert_mut(value)),
         }
     }
 
@@ -998,10 +1101,10 @@ where
     where
         K: Borrow<Q>,
         Q: Hash + Eq,
-        S: Clone
+        S: Clone,
     {
         let (shard, parent) = self.shard_and_parent(k)?;
-        
+
         let ret = shard.remove_entry(k);
         if shard.is_empty() {
             parent.retain(|_, t| !t.is_empty());
@@ -1132,7 +1235,7 @@ impl<K: Clone, V, S> Clone for Iter<K, V, S> {
         Iter {
             base: self.base.clone(),
             shard1: None,
-            shard2: None
+            shard2: None,
         }
     }
 }
@@ -1199,7 +1302,6 @@ pub struct IntoIter<K: Clone, V, S> {
     base: cow_hashbrown::hash_map::Iter<ShardIndex, ShardMap<K, V, S>>,
     shard1: Option<cow_hashbrown::hash_map::Iter<ShardIndex, base::CowHashMap<K, V, S>>>,
     shard2: Option<cow_hashbrown::hash_map::Iter<K, V>>,
-
 }
 
 impl<K: Clone, V, S> IntoIter<K, V, S> {
@@ -1473,7 +1575,9 @@ impl<K: Clone + fmt::Debug, V: fmt::Debug, S> Error for OccupiedError<K, V, S> {
 }
 
 impl<K: Clone, V, S> IntoIterator for &CowHashMap<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     type Item = (K, Arc<V>);
     type IntoIter = IntoIter<K, V, S>;
 
@@ -1488,7 +1592,9 @@ where S: Clone {
 }
 
 impl<K: Clone, V, S> IntoIterator for &mut CowHashMap<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     type Item = (K, Arc<V>);
     type IntoIter = IntoIter<K, V, S>;
 
@@ -1503,7 +1609,9 @@ where S: Clone {
 }
 
 impl<K: Clone, V, S> IntoIterator for CowHashMap<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     type Item = (K, Arc<V>);
     type IntoIter = IntoIter<K, V, S>;
 
@@ -1564,23 +1672,28 @@ impl<K: Clone, V, S> Iterator for Iter<K, V, S> {
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
 impl<K: Clone, V, S> ExactSizeIterator for Iter<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
 
 impl<K: Clone, V, S> FusedIterator for Iter<K, V, S> {}
 
-impl<K: Clone, V, S> Iterator for IterMut<K, V, S> {
+impl<K: Clone, V, S> Iterator for IterMut<K, V, S>
+where
+    V: Clone,
+{
     type Item = (K, CowValueGuard<V>);
 
     #[inline]
@@ -1608,20 +1721,25 @@ impl<K: Clone, V, S> Iterator for IterMut<K, V, S> {
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
-impl<K: Clone, V, S> ExactSizeIterator for IterMut<K, V, S> {
+impl<K: Clone, V, S> ExactSizeIterator for IterMut<K, V, S>
+where
+    V: Clone,
+{
     #[inline]
     fn len(&self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
-impl<K: Clone, V, S> FusedIterator for IterMut<K, V, S> {}
+impl<K: Clone, V, S> FusedIterator for IterMut<K, V, S> where V: Clone {}
 
 impl<K: Clone, V, S> fmt::Debug for IterMut<K, V, S>
 where
@@ -1634,7 +1752,8 @@ where
 }
 
 impl<K: Clone, V, S> Iterator for IntoIter<K, V, S>
-where S: Clone
+where
+    S: Clone,
 {
     type Item = (K, Arc<V>);
 
@@ -1663,22 +1782,25 @@ where S: Clone
     }
     #[inline]
     fn count(self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
 impl<K: Clone, V, S> ExactSizeIterator for IntoIter<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     #[inline]
     fn len(&self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
-impl<K: Clone, V, S> FusedIterator for IntoIter<K, V, S>
-where S: Clone {}
+impl<K: Clone, V, S> FusedIterator for IntoIter<K, V, S> where S: Clone {}
 
 impl<K: Clone + Debug, V: Debug, S> fmt::Debug for IntoIter<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1750,7 +1872,10 @@ impl<K: Clone, V, S> ExactSizeIterator for Values<K, V, S> {
 }
 impl<K: Clone, V, S> FusedIterator for Values<K, V, S> {}
 
-impl<K: Clone, V, S> Iterator for ValuesMut<K, V, S> {
+impl<K: Clone, V, S> Iterator for ValuesMut<K, V, S>
+where
+    V: Clone,
+{
     type Item = CowValueGuard<V>;
 
     #[inline]
@@ -1774,13 +1899,16 @@ impl<K: Clone, V, S> Iterator for ValuesMut<K, V, S> {
         self.inner.fold(init, |acc, (_, v)| f(acc, v))
     }
 }
-impl<K: Clone, V, S> ExactSizeIterator for ValuesMut<K, V, S> {
+impl<K: Clone, V, S> ExactSizeIterator for ValuesMut<K, V, S>
+where
+    V: Clone,
+{
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V, S> FusedIterator for ValuesMut<K, V, S> {}
+impl<K: Clone, V, S> FusedIterator for ValuesMut<K, V, S> where V: Clone {}
 
 impl<K: Clone, V: fmt::Debug, S> fmt::Debug for ValuesMut<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1791,7 +1919,9 @@ impl<K: Clone, V: fmt::Debug, S> fmt::Debug for ValuesMut<K, V, S> {
 }
 
 impl<K: Clone, V, S> Iterator for IntoKeys<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     type Item = K;
 
     #[inline]
@@ -1816,14 +1946,15 @@ where S: Clone {
     }
 }
 impl<K: Clone, V, S> ExactSizeIterator for IntoKeys<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V, S> FusedIterator for IntoKeys<K, V, S>
-where S: Clone {}
+impl<K: Clone, V, S> FusedIterator for IntoKeys<K, V, S> where S: Clone {}
 
 impl<K: Clone + Debug, V, S> fmt::Debug for IntoKeys<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1834,7 +1965,9 @@ impl<K: Clone + Debug, V, S> fmt::Debug for IntoKeys<K, V, S> {
 }
 
 impl<K: Clone, V, S> Iterator for IntoValues<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     type Item = Arc<V>;
 
     #[inline]
@@ -1859,14 +1992,15 @@ where S: Clone {
     }
 }
 impl<K: Clone, V, S> ExactSizeIterator for IntoValues<K, V, S>
-where S: Clone {
+where
+    S: Clone,
+{
     #[inline]
     fn len(&self) -> usize {
         self.inner.len()
     }
 }
-impl<K: Clone, V, S> FusedIterator for IntoValues<K, V, S>
-where S: Clone {}
+impl<K: Clone, V, S> FusedIterator for IntoValues<K, V, S> where S: Clone {}
 
 impl<K: Clone, V: Debug, S> fmt::Debug for IntoValues<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1906,9 +2040,10 @@ impl<'a, K: Clone, V, S> Iterator for Drain<K, V, S> {
 impl<K: Clone, V, S> ExactSizeIterator for Drain<K, V, S> {
     #[inline]
     fn len(&self) -> usize {
-        self.base.clone().map(|(_, t)| {
-            t.iter().map(|(_, t)| t.len()).sum::<usize>()
-        }).sum()
+        self.base
+            .clone()
+            .map(|(_, t)| t.iter().map(|(_, t)| t.len()).sum::<usize>())
+            .sum()
     }
 }
 impl<K: Clone, V, S> FusedIterator for Drain<K, V, S> {}
@@ -1942,14 +2077,44 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(6));
     /// ```
     #[inline]
-    pub fn or_insert(self, default: V) -> CowValueGuard<V>
+    pub fn or_insert(self, default: V) -> Arc<V>
     where
         K: Hash,
         S: BuildHasher,
     {
         match self {
-            Occupied(entry) => entry.into_mut(),
+            Occupied(entry) => entry.get(),
             Vacant(entry) => entry.insert(default),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default if empty, and returns
+    /// a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert(3);
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(3));
+    ///
+    /// *map.entry("poneyland").or_insert(10) *= 2;
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(6));
+    /// ```
+    #[inline]
+    pub fn or_insert_mut(self, default: V) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        match self {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => entry.insert_mut(default),
         }
     }
 
@@ -1970,14 +2135,43 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
     /// ```
     #[inline]
-    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> CowValueGuard<V>
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> Arc<V>
     where
         K: Hash,
         S: BuildHasher,
     {
         match self {
-            Occupied(entry) => entry.into_mut(),
+            Occupied(entry) => entry.get(),
             Vacant(entry) => entry.insert(default()),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the default function if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_insert_with(|| value);
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_insert_with_mut<F: FnOnce() -> V>(self, default: F) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        match self {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => entry.insert_mut(default()),
         }
     }
 
@@ -1999,17 +2193,45 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
     /// ```
     #[inline]
-    pub fn or_try_insert_with<F: FnOnce() -> Option<V>>(self, f: F) -> Option<CowValueGuard<V>>
+    pub fn or_try_insert_with<F: FnOnce() -> Option<V>>(self, f: F) -> Option<Arc<V>>
     where
         K: Hash,
         S: BuildHasher,
     {
-        Some(
-            match self {
-                Occupied(entry) => entry.into_mut(),
-                Vacant(entry) => entry.insert(f()?),
-            }
-        )
+        Some(match self {
+            Occupied(entry) => entry.get(),
+            Vacant(entry) => entry.insert(f()?),
+        })
+    }
+
+    /// Ensures a value is in the entry by trying to insert the result of function if empty,
+    /// and returns a mutable reference to the value in the entry if that function was
+    /// successful.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_try_insert_with(|| Some(value)).unwrap();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_try_insert_with_mut<F: FnOnce() -> Option<V>>(self, f: F) -> Option<CowValueGuard<V>>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        Some(match self {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => entry.insert_mut(f()?),
+        })
     }
 
     /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
@@ -2032,16 +2254,51 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(9));
     /// ```
     #[inline]
-    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> CowValueGuard<V>
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> Arc<V>
     where
         K: Hash,
         S: BuildHasher,
     {
         match self {
-            Occupied(entry) => entry.into_mut(),
+            Occupied(entry) => entry.get(),
             Vacant(entry) => {
                 let value = default(entry.key());
                 entry.insert(value)
+            }
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
+    /// This method allows for generating key-derived values for insertion by providing the default
+    /// function a reference to the key that was moved during the `.entry(key)` method call.
+    ///
+    /// The reference to the moved key is provided so that cloning or copying the key is
+    /// unnecessary, unlike with `.or_insert_with(|| ... )`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, usize> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert_with_key(|key| key.chars().count());
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(9));
+    /// ```
+    #[inline]
+    pub fn or_insert_with_key_mut<F: FnOnce(&K) -> V>(self, default: F) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        match self {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => {
+                let value = default(entry.key());
+                entry.insert_mut(value)
             }
         }
     }
@@ -2088,6 +2345,7 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     pub fn and_modify<F>(self, f: F) -> Self
     where
         F: FnOnce(CowValueGuard<V>),
+        V: Clone,
     {
         match self {
             Occupied(entry) => {
@@ -2117,14 +2375,43 @@ impl<K: Clone, V: Default, S> Entry<K, V, S> {
     /// # }
     /// ```
     #[inline]
-    pub fn or_default(self) -> CowValueGuard<V>
+    pub fn or_default(self) -> Arc<V>
     where
         K: Hash,
         S: BuildHasher,
     {
         match self {
-            Occupied(entry) => entry.into_mut(),
+            Occupied(entry) => entry.get(),
             Vacant(entry) => entry.insert(Default::default()),
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default value if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() {
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, Option<u32>> = HashMap::new();
+    /// map.entry("poneyland").or_default();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(None));
+    /// # }
+    /// ```
+    #[inline]
+    pub fn or_default_mut(self) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        match self {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => entry.insert_mut(Default::default()),
         }
     }
 }
@@ -2224,7 +2511,10 @@ impl<K: Clone, V, S> OccupiedEntry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(24));
     /// ```
     #[inline]
-    pub fn get_mut(&self) -> CowValueGuard<V> {
+    pub fn get_mut(&self) -> CowValueGuard<V>
+    where
+        V: Clone,
+    {
         self.base.get_mut()
     }
 
@@ -2254,7 +2544,10 @@ impl<K: Clone, V, S> OccupiedEntry<K, V, S> {
     /// assert_eq!(map.get(&key).unwrap(), Arc::new(22));
     /// ```
     #[inline]
-    pub fn into_mut(self) -> CowValueGuard<V> {
+    pub fn into_mut(self) -> CowValueGuard<V>
+    where
+        V: Clone,
+    {
         self.base.into_mut()
     }
 
@@ -2311,8 +2604,21 @@ impl<K: Clone, V, S> OccupiedEntry<K, V, S> {
     /// Replaces the entry, returning the old key and value. The new key in the hash map will be
     /// the key used to create this entry.
     #[inline]
-    pub fn replace_entry(self, value: V) -> (K, CowValueGuard<V>) {
+    pub fn replace_entry(self, value: V) -> (K, Arc<V>)
+    where
+        V: Clone,
+    {
         self.base.replace_entry(value)
+    }
+
+    /// Replaces the entry, returning the old key and value. The new key in the hash map will be
+    /// the key used to create this entry.
+    #[inline]
+    pub fn replace_entry_mut(self, value: V) -> (K, CowValueGuard<V>)
+    where
+        V: Clone,
+    {
+        self.base.replace_entry_mut(value)
     }
 
     /// Replaces the key in the hash map with the key used to create this entry.
@@ -2377,12 +2683,39 @@ impl<K: Clone, V, S> VacantEntry<K, V, S> {
     /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(37));
     /// ```
     #[inline]
-    pub fn insert(self, value: V) -> CowValueGuard<V>
+    pub fn insert(self, value: V) -> Arc<V>
     where
         K: Hash,
         S: BuildHasher,
     {
         self.base.insert(value)
+    }
+
+    /// Sets the value of the entry with the `VacantEntry`'s key,
+    /// and returns a mutable reference to it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use cow_hashmap::Entry;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    ///
+    /// if let Entry::Vacant(o) = map.entry("poneyland") {
+    ///     o.insert(37);
+    /// }
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(37));
+    /// ```
+    #[inline]
+    pub fn insert_mut(self, value: V) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        self.base.insert_mut(value)
     }
 }
 
@@ -2428,9 +2761,7 @@ where
 }
 
 #[inline]
-fn map_entry<K: Clone, V, S>(
-    raw: cow_hashbrown::hash_map::Entry<K, V, S>,
-) -> Entry<K, V, S> {
+fn map_entry<K: Clone, V, S>(raw: cow_hashbrown::hash_map::Entry<K, V, S>) -> Entry<K, V, S> {
     match raw {
         cow_hashbrown::hash_map::Entry::Occupied(base) => Entry::Occupied(OccupiedEntry { base }),
         cow_hashbrown::hash_map::Entry::Vacant(base) => Entry::Vacant(VacantEntry { base }),
