@@ -7,7 +7,8 @@ use cow_hashbrown::{self as base, Equivalent};
 use std::borrow::Borrow;
 use std::error::Error;
 use std::fmt::{self, Debug};
-use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+use std::hash::{BuildHasher, Hash, Hasher};
+use std::collections::hash_map::RandomState;
 use std::iter::FusedIterator;
 use std::sync::Arc;
 
