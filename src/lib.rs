@@ -823,11 +823,15 @@ where
     /// assert_eq!(letters.get(&'y'), None);
     /// ```
     #[inline]
-    pub fn entry_partial_lock(&self, key: K) -> LockableEntry<K, V, S>
+    pub fn entry_or_lock(&self, key: K) -> LockableEntry<'_, K, V, S>
     where
         S: Clone,
     {
-        LockableEntry(map_entry(self.shard_mut(&key).entry(key)), &self.lock)
+        if self.contains_key(&key) {
+            LockableEntry(map_entry(self.shard_mut(&key).entry(key)), None)
+        } else {
+            LockableEntry(map_entry(self.shard_mut(&key).entry(key)), Some(self.lock.lock().unwrap()))
+        }
     }
 
     /// Returns a reference to the value corresponding to the key.
@@ -1541,12 +1545,6 @@ pub enum Entry<K: Clone, V, S> {
     Vacant(VacantEntry<K, V, S>),
 }
 
-impl<K: Clone, V, S> Entry<K, V, S> {
-    fn is_occupied(&self) -> bool {
-        matches!(self, Entry::Occupied(_))
-    }
-}
-
 impl<K: Clone + Debug, V: Debug, S> Debug for Entry<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
@@ -1561,7 +1559,7 @@ impl<K: Clone + Debug, V: Debug, S> Debug for Entry<K, V, S> {
 /// This `enum` is constructed from the [`entry`] method on [`HashMap`].
 ///
 /// [`entry`]: HashMap::entry
-pub struct LockableEntry<'a, K: Clone, V, S>(Entry<K, V, S>, &'a Arc<Mutex<()>>);
+pub struct LockableEntry<'a, K: Clone, V, S>(Entry<K, V, S>, Option<MutexGuard<'a, ()>>);
 
 impl<K: Clone + Debug, V: Debug, S> Debug for LockableEntry<'_, K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -2462,12 +2460,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         K: Hash,
         S: BuildHasher,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert(default)
-        }
+        self.0.or_insert(default)
     }
 
     /// Ensures a value is in the entry by inserting the default if empty, and returns
@@ -2494,12 +2487,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         S: BuildHasher,
         V: Clone,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert_mut(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert_mut(default)
-        }
+        self.0.or_insert_mut(default)
     }
 
     /// Ensures a value is in the entry by inserting the result of the default function if empty,
@@ -2524,12 +2512,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         K: Hash,
         S: BuildHasher,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert_with(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert_with(default)
-        }
+        self.0.or_insert_with(default)
     }
 
     /// Ensures a value is in the entry by inserting the result of the default function if empty,
@@ -2555,12 +2538,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         S: BuildHasher,
         V: Clone,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert_with_mut(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert_with_mut(default)
-        }
+        self.0.or_insert_with_mut(default)
     }
 
     /// Ensures a value is in the entry by trying to insert the result of function if empty,
@@ -2586,12 +2564,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         K: Hash,
         S: BuildHasher,
     {
-        if self.0.is_occupied() {
-            self.0.or_try_insert_with(f)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_try_insert_with(f)
-        }
+        self.0.or_try_insert_with(f)
     }
 
     /// Ensures a value is in the entry by trying to insert the result of function if empty,
@@ -2618,12 +2591,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         S: BuildHasher,
         V: Clone,
     {
-        if self.0.is_occupied() {
-            self.0.or_try_insert_with_mut(f)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_try_insert_with_mut(f)
-        }
+        self.0.or_try_insert_with_mut(f)
     }
 
     /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
@@ -2651,12 +2619,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         K: Hash,
         S: BuildHasher,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert_with_key(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert_with_key(default)
-        }
+        self.0.or_insert_with_key(default)
     }
 
     /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
@@ -2685,12 +2648,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         S: BuildHasher,
         V: Clone,
     {
-        if self.0.is_occupied() {
-            self.0.or_insert_with_key_mut(default)
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_insert_with_key_mut(default)
-        }
+        self.0.or_insert_with_key_mut(default)
     }
 
     /// Returns a reference to this entry's key.
@@ -2751,12 +2709,7 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
         F: FnOnce(CowValueGuard<V>),
         V: Clone,
     {
-        if self.0.is_occupied() {
-            Self(self.0.and_modify(f), self.1)
-        } else {
-            let _guard = self.1.lock();
-            Self(self.0.and_modify(f), self.1)
-        }
+        Self(self.0.and_modify(f), self.1)
     }
 }
 
@@ -2842,12 +2795,7 @@ impl<K: Clone, V: Default, S> LockableEntry<'_, K, V, S> {
         K: Hash,
         S: BuildHasher,
     {
-        if self.0.is_occupied() {
-            self.0.or_default()
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_default()
-        }
+        self.0.or_default()
     }
 
     /// Ensures a value is in the entry by inserting the default value if empty,
@@ -2873,12 +2821,7 @@ impl<K: Clone, V: Default, S> LockableEntry<'_, K, V, S> {
         S: BuildHasher,
         V: Clone,
     {
-        if self.0.is_occupied() {
-            self.0.or_default_mut()
-        } else {
-            let _guard = self.1.lock();
-            self.0.or_default_mut()
-        }
+        self.0.or_default_mut()
     }
 }
 
