@@ -2385,6 +2385,23 @@ impl<K: Clone, V, S> Entry<K, V, S> {
         }
     }
 
+    /// Provides in-place access to an occupied entry before any
+    /// potential inserts into the map.
+    #[inline]
+    pub fn and<F>(self, f: F) -> Self
+    where
+        F: FnOnce(Arc<V>),
+        V: Clone,
+    {
+        match self {
+            Occupied(entry) => {
+                f(entry.get());
+                Occupied(entry)
+            }
+            Vacant(entry) => Vacant(entry),
+        }
+    }
+
     /// Provides in-place mutable access to an occupied entry before any
     /// potential inserts into the map.
     ///
@@ -2690,6 +2707,23 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
     pub fn key(&self) -> &K {
         self.0.key()
     }
+    
+    /// Provides in-place access to an occupied entry before any
+    /// potential inserts into the map.
+    #[inline]
+    pub fn and<F>(self, f: F) -> Self
+    where
+        F: FnOnce(Arc<V>),
+        V: Clone,
+    {
+        match self.0 {
+            Occupied(entry) => {
+                f(entry.get());
+                Self(Occupied(entry), self.1)
+            }
+            Vacant(entry) => Self(Vacant(entry), self.1),
+        }
+    }
 
     /// Provides in-place mutable access to an occupied entry before any
     /// potential inserts into the map.
@@ -2712,16 +2746,16 @@ impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
     /// assert_eq!(*map.get("poneyland").unwrap(), 43);
     /// ```
     #[inline]
-    pub fn and_modify<F>(self, f: F) -> Entry<K, V, S>
+    pub fn and_modify<F>(self, f: F) -> Self
     where
         F: FnOnce(CowValueGuard<V>),
         V: Clone,
     {
         if self.0.is_occupied() {
-            self.0.and_modify(f)
+            Self(self.0.and_modify(f), self.1)
         } else {
             let _guard = self.1.lock();
-            self.0.and_modify(f)
+            Self(self.0.and_modify(f), self.1)
         }
     }
 }
