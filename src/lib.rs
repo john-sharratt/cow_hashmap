@@ -5,12 +5,12 @@ use self::Entry::*;
 use cow_hashbrown::{self as base, Equivalent};
 
 use std::borrow::Borrow;
+use std::collections::hash_map::RandomState;
 use std::error::Error;
 use std::fmt::{self, Debug};
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::collections::hash_map::RandomState;
 use std::iter::FusedIterator;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub use cow_hashbrown::hash_map::CowValueGuard;
 
@@ -246,6 +246,7 @@ type ShardMap<K, V, S> = base::CowHashMap<ShardIndex, base::CowHashMap<K, V, S>,
 
 pub struct CowHashMap<K: Clone, V, S = RandomState> {
     base: base::CowHashMap<ShardIndex, ShardMap<K, V, S>, S>,
+    lock: Arc<Mutex<()>>,
 }
 
 impl<K: Clone, V> CowHashMap<K, V, RandomState> {
@@ -295,6 +296,7 @@ impl<K: Clone, V, S> CowHashMap<K, V, S> {
     pub fn with_hasher(hash_builder: S) -> CowHashMap<K, V, S> {
         CowHashMap {
             base: base::CowHashMap::with_hasher(hash_builder),
+            lock: Default::default(),
         }
     }
 
@@ -791,6 +793,36 @@ where
         map_entry(self.shard_mut(&key).entry(key))
     }
 
+    /// Gets the given key's corresponding entry in the map for in-place manipulation.
+    ///
+    /// If the entry does not exist then the act of creating the entry will be done
+    /// under a lock to prevent concurrent inserts
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut letters = HashMap::new();
+    ///
+    /// for ch in "a short treatise on fungi".chars() {
+    ///     letters.entry(ch).and_modify(|mut counter| *counter += 1).or_insert(1);
+    /// }
+    ///
+    /// assert_eq!(letters.get(&'s').unwrap(), Arc::new(2));
+    /// assert_eq!(letters.get(&'t').unwrap(), Arc::new(3));
+    /// assert_eq!(letters.get(&'u').unwrap(), Arc::new(1));
+    /// assert_eq!(letters.get(&'y'), None);
+    /// ```
+    #[inline]
+    pub fn entry_partial_lock(&self, key: K) -> LockableEntry<K, V, S>
+    where
+        S: Clone,
+    {
+        LockableEntry(map_entry(self.shard_mut(&key).entry(key)), &self.lock)
+    }
+
     /// Returns a reference to the value corresponding to the key.
     ///
     /// The key may be any borrowed form of the map's key type, but
@@ -1125,12 +1157,14 @@ where
     fn clone(&self) -> Self {
         Self {
             base: self.base.clone(),
+            lock: self.lock.clone(),
         }
     }
 
     #[inline]
     fn clone_from(&mut self, other: &Self) {
         self.base.clone_from(&other.base);
+        self.lock.clone_from(&other.lock);
     }
 }
 
@@ -1500,9 +1534,31 @@ pub enum Entry<K: Clone, V, S> {
     Vacant(VacantEntry<K, V, S>),
 }
 
+impl<K: Clone, V, S> Entry<K, V, S> {
+    fn is_occupied(&self) -> bool {
+        matches!(self, Entry::Occupied(_))
+    }
+}
+
 impl<K: Clone + Debug, V: Debug, S> Debug for Entry<K, V, S> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match *self {
+            Vacant(ref v) => f.debug_tuple("Entry").field(v).finish(),
+            Occupied(ref o) => f.debug_tuple("Entry").field(o).finish(),
+        }
+    }
+}
+
+/// A view into a single entry in a map, which may either be vacant or occupied.
+///
+/// This `enum` is constructed from the [`entry`] method on [`HashMap`].
+///
+/// [`entry`]: HashMap::entry
+pub struct LockableEntry<'a, K: Clone, V, S>(Entry<K, V, S>, &'a Arc<Mutex<()>>);
+
+impl<K: Clone + Debug, V: Debug, S> Debug for LockableEntry<'_, K, V, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
             Vacant(ref v) => f.debug_tuple("Entry").field(v).finish(),
             Occupied(ref o) => f.debug_tuple("Entry").field(o).finish(),
         }
@@ -2358,6 +2414,311 @@ impl<K: Clone, V, S> Entry<K, V, S> {
     }
 }
 
+impl<K: Clone, V, S> LockableEntry<'_, K, V, S> {
+    /// Ensures a value is in the entry by inserting the default if empty, and returns
+    /// a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert(3);
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(3));
+    ///
+    /// *map.entry("poneyland").or_insert(10) *= 2;
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(6));
+    /// ```
+    #[inline]
+    pub fn or_insert(self, default: V) -> Arc<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert(default)
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default if empty, and returns
+    /// a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert(3);
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(3));
+    ///
+    /// *map.entry("poneyland").or_insert(10) *= 2;
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(6));
+    /// ```
+    #[inline]
+    pub fn or_insert_mut(self, default: V) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert_mut(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert_mut(default)
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the default function if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_insert_with(|| value);
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> Arc<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert_with(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert_with(default)
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the result of the default function if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_insert_with(|| value);
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_insert_with_mut<F: FnOnce() -> V>(self, default: F) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert_with_mut(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert_with_mut(default)
+        }
+    }
+
+    /// Ensures a value is in the entry by trying to insert the result of function if empty,
+    /// and returns a mutable reference to the value in the entry if that function was
+    /// successful.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_try_insert_with(|| Some(value)).unwrap();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_try_insert_with<F: FnOnce() -> Option<V>>(self, f: F) -> Option<Arc<V>>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        if self.0.is_occupied() {
+            self.0.or_try_insert_with(f)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_try_insert_with(f)
+        }
+    }
+
+    /// Ensures a value is in the entry by trying to insert the result of function if empty,
+    /// and returns a mutable reference to the value in the entry if that function was
+    /// successful.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map = HashMap::new();
+    /// let value = "hoho";
+    ///
+    /// map.entry("poneyland").or_try_insert_with(|| Some(value)).unwrap();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new("hoho"));
+    /// ```
+    #[inline]
+    pub fn or_try_insert_with_mut<F: FnOnce() -> Option<V>>(self, f: F) -> Option<CowValueGuard<V>>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.or_try_insert_with_mut(f)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_try_insert_with_mut(f)
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
+    /// This method allows for generating key-derived values for insertion by providing the default
+    /// function a reference to the key that was moved during the `.entry(key)` method call.
+    ///
+    /// The reference to the moved key is provided so that cloning or copying the key is
+    /// unnecessary, unlike with `.or_insert_with(|| ... )`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, usize> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert_with_key(|key| key.chars().count());
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(9));
+    /// ```
+    #[inline]
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> Arc<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert_with_key(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert_with_key(default)
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting, if empty, the result of the default function.
+    /// This method allows for generating key-derived values for insertion by providing the default
+    /// function a reference to the key that was moved during the `.entry(key)` method call.
+    ///
+    /// The reference to the moved key is provided so that cloning or copying the key is
+    /// unnecessary, unlike with `.or_insert_with(|| ... )`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, usize> = HashMap::new();
+    ///
+    /// map.entry("poneyland").or_insert_with_key(|key| key.chars().count());
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(9));
+    /// ```
+    #[inline]
+    pub fn or_insert_with_key_mut<F: FnOnce(&K) -> V>(self, default: F) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.or_insert_with_key_mut(default)
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_insert_with_key_mut(default)
+        }
+    }
+
+    /// Returns a reference to this entry's key.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    /// assert_eq!(map.entry("poneyland").key(), &"poneyland");
+    /// ```
+    #[inline]
+    pub fn key(&self) -> &K {
+        self.0.key()
+    }
+
+    /// Provides in-place mutable access to an occupied entry before any
+    /// potential inserts into the map.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cow_hashmap::CowHashMap as HashMap;
+    ///
+    /// let mut map: HashMap<&str, u32> = HashMap::new();
+    ///
+    /// map.entry("poneyland")
+    ///    .and_modify(|mut e| { *e += 1 })
+    ///    .or_insert(42);
+    /// assert_eq!(*map.get("poneyland").unwrap(), 42);
+    ///
+    /// map.entry("poneyland")
+    ///    .and_modify(|mut e| { *e += 1 })
+    ///    .or_insert(42);
+    /// assert_eq!(*map.get("poneyland").unwrap(), 43);
+    /// ```
+    #[inline]
+    pub fn and_modify<F>(self, f: F) -> Entry<K, V, S>
+    where
+        F: FnOnce(CowValueGuard<V>),
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.and_modify(f)
+        } else {
+            let _guard = self.1.lock();
+            self.0.and_modify(f)
+        }
+    }
+}
+
 impl<K: Clone, V: Default, S> Entry<K, V, S> {
     /// Ensures a value is in the entry by inserting the default value if empty,
     /// and returns a mutable reference to the value in the entry.
@@ -2413,6 +2774,69 @@ impl<K: Clone, V: Default, S> Entry<K, V, S> {
         match self {
             Occupied(entry) => entry.into_mut(),
             Vacant(entry) => entry.insert_mut(Default::default()),
+        }
+    }
+}
+
+impl<K: Clone, V: Default, S> LockableEntry<'_, K, V, S> {
+    /// Ensures a value is in the entry by inserting the default value if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() {
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, Option<u32>> = HashMap::new();
+    /// map.entry("poneyland").or_default();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(None));
+    /// # }
+    /// ```
+    #[inline]
+    pub fn or_default(self) -> Arc<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+    {
+        if self.0.is_occupied() {
+            self.0.or_default()
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_default()
+        }
+    }
+
+    /// Ensures a value is in the entry by inserting the default value if empty,
+    /// and returns a mutable reference to the value in the entry.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # fn main() {
+    /// use cow_hashmap::CowHashMap as HashMap;
+    /// use std::sync::Arc;
+    ///
+    /// let mut map: HashMap<&str, Option<u32>> = HashMap::new();
+    /// map.entry("poneyland").or_default();
+    ///
+    /// assert_eq!(map.get("poneyland").unwrap(), Arc::new(None));
+    /// # }
+    /// ```
+    #[inline]
+    pub fn or_default_mut(self) -> CowValueGuard<V>
+    where
+        K: Hash,
+        S: BuildHasher,
+        V: Clone,
+    {
+        if self.0.is_occupied() {
+            self.0.or_default_mut()
+        } else {
+            let _guard = self.1.lock();
+            self.0.or_default_mut()
         }
     }
 }
