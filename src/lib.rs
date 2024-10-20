@@ -10,7 +10,7 @@ use std::error::Error;
 use std::fmt::{self, Debug};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::iter::FusedIterator;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 pub use cow_hashbrown::hash_map::CowValueGuard;
 
@@ -791,6 +791,13 @@ where
         S: Clone,
     {
         map_entry(self.shard_mut(&key).entry(key))
+    }
+
+    /// Locks the hashmap for exclusive access (all other accessors
+    /// must also use this lock method otherwise they can still
+    /// access the hashmap)
+    pub fn lock<'a>(&'a self) -> MutexGuard<'a, ()> {
+        self.lock.lock().unwrap()
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
