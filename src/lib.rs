@@ -827,10 +827,11 @@ where
     where
         S: Clone,
     {
-        if self.contains_key(&key) {
-            LockableEntry(map_entry(self.shard_mut(&key).entry(key)), None)
+        let entry = map_entry(self.shard_mut(&key).entry(key));
+        if matches!(entry, Entry::Occupied(_)) {
+            LockableEntry(entry, None)
         } else {
-            LockableEntry(map_entry(self.shard_mut(&key).entry(key)), Some(self.lock.lock().unwrap()))
+            LockableEntry(entry, Some(self.lock.lock().unwrap()))
         }
     }
 
